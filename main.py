@@ -2,31 +2,74 @@ import os
 import datetime as dt
 import discord
 from discord.ext import commands, tasks
-
 from pathlib import Path
 from dotenv import load_dotenv
 
+# ===== 환경 설정 =====
 env_path = Path(__file__).resolve().parent / ".env"
-print(f"[DEBUG] loading env from {env_path}")  # 경로 확인용
+print(f"[DEBUG] loading env from {env_path}")
 load_dotenv(dotenv_path=env_path, override=True)
-
-import os
-TOKEN = os.getenv("DISCORD_TOKEN")
-print(f"[DEBUG] TOKEN loaded? {'yes' if TOKEN else 'no'}")
-# 로컬 편의: .env 로드(서버도 사용 가능)
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
-from bot.storage import StateStore, now_kst, iso
 
 TOKEN = os.getenv("DISCORD_TOKEN", "")
 VOICE_CHANNEL_ID = int(os.getenv("VOICE_CHANNEL_ID", "0"))
 REPORT_CHANNEL_ID = int(os.getenv("REPORT_CHANNEL_ID", "0"))
 DATA_FILE = os.getenv("DATA_FILE", "voice_time.json")
 
+if not TOKEN:
+    raise SystemExit("DISCORD_TOKEN 환경변수를 설정하세요 (.env 사용 가능).")
+if not VOICE_CHANNEL_ID or not REPORT_CHANNEL_ID:
+    raise SystemExit("VOICE_CHANNEL_ID / REPORT_CHANNEL_ID 환경변수를 설정하세요.")
+
+# ===== 유틸리티 =====
+KST = dt.timezone(dt.timedelta(hours=9))
+
+def now_kst() -> dt.datetime:
+    return dt.datetime.now(tz=KST)
+
+def iso(dtobj: dt.datetime) -> str:
+    return dtobj.astimezone(KST).isoformat()
+
+def parse_iso(s: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(s)
+
+# ===== 상태 저장 =====
+import json
+from typing import Dict, Any
+
+class StateStore:
+    def __init__(self, data_file: str):
+        self.data_file = data_file
+        self.state: Dict[str, Dict[str, Any]] = {
+            "totals": {},
+            "sessions": {}
+        }
+
+    def load(self):
+        if os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.state["totals"] = data.get("totals", {})
+                    self.state["sessions"] = data.get("sessions", {})
+            except Exception:
+                pass
+
+    def save(self):
+        with open(self.data_file, "w", encoding="utf-8") as f:
+            json.dump(self.state, f, ensure_ascii=False)
+
+    def add_session_time(self, user_id: int, until: dt.datetime | None = None):
+        uid = str(user_id)
+        start_iso = self.state["sessions"].get(uid)
+        if not start_iso:
+            return
+        start = parse_iso(start_iso)
+        end = until or now_kst()
+        elapsed = int((end - start).total_seconds())
+        if elapsed > 0:
+            self.state["totals"][uid] = self.state["totals"].get(uid, 0) + elapsed
+
+# ===== 디스코드 봇 설정 =====
 intents = discord.Intents.default()
 intents.guilds = True
 intents.voice_states = True
@@ -34,6 +77,11 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 store = StateStore(DATA_FILE)
+
+# 채널 상태 관리 변수
+channel_active = False
+last_alert_time = None
+COOLDOWN_SECONDS = 10 * 60  # 10분
 
 @bot.event
 async def on_ready():
@@ -43,38 +91,62 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    global channel_active, last_alert_time
+
     target_id = VOICE_CHANNEL_ID
     uid = str(member.id)
 
     before_id = before.channel.id if before.channel else None
     after_id = after.channel.id if after.channel else None
 
-    # 입장
+    # 입장 처리
     if before_id != target_id and after_id == target_id:
         store.state["sessions"][uid] = iso(now_kst())
         store.save()
+
+        channel = after.channel
+        members = [m for m in channel.members if not m.bot]  # 봇 제외
+
+        # 아무도 없다가 처음 들어온 경우 & 쿨다운 체크
+        now = dt.datetime.now(tz=KST)
+        cooldown_ok = (
+            last_alert_time is None or
+            (now - last_alert_time).total_seconds() > COOLDOWN_SECONDS
+        )
+
+        if not channel_active and members and cooldown_ok:
+            channel_active = True
+            last_alert_time = now
+
+            mention_list = " ".join(m.mention for m in members)
+            report_ch = bot.get_channel(REPORT_CHANNEL_ID) or await bot.fetch_channel(REPORT_CHANNEL_ID)
+            await report_ch.send(f"{mention_list}\n음성 채널 **{channel.name}**에 멤버가 있습니다!")
+
         return
 
-    # 퇴장
+    # 퇴장 처리
     if before_id == target_id and after_id != target_id:
         store.add_session_time(member.id)
         store.state["sessions"].pop(uid, None)
         store.save()
+
+        # 채널이 비었으면 상태 초기화
+        if before.channel and len([m for m in before.channel.members if not m.bot]) == 0:
+            channel_active = False
+
         return
 
-# 매일 23:00 KST(= UTC 14:00), 일요일에만 전송
+# ===== 주간 리포트 =====
 @tasks.loop(time=dt.time(hour=14, minute=0, tzinfo=dt.timezone.utc))
 async def daily_reporter():
     now = now_kst()
     if now.weekday() != 6:
         return
 
-    # 진행중 세션 누적
     for uid in list(store.state["sessions"].keys()):
         store.add_session_time(int(uid), until=now)
         store.state["sessions"][uid] = iso(now)
 
-    # 리포트 생성
     if not store.state["totals"]:
         content = "이번 주 대상 음성 채널 체류 기록이 없습니다."
     else:
@@ -85,19 +157,17 @@ async def daily_reporter():
             lines.append(f"- <@{uid}>: {hours:.2f}h")
         content = "\n".join(lines)
 
-    # 전송
     channel = bot.get_channel(REPORT_CHANNEL_ID) or await bot.fetch_channel(REPORT_CHANNEL_ID)
     try:
         await channel.send(content)
     finally:
-        # 주간 초기화
         store.state["totals"] = {}
         store.save()
 
+# ===== 명령어 =====
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def voicetime(ctx):
-    """현재까지의 누적 시간 출력"""
     if not store.state["totals"]:
         await ctx.send("현재 누적 데이터가 없습니다.")
         return
@@ -109,8 +179,4 @@ async def voicetime(ctx):
     await ctx.send("\n".join(lines))
 
 if __name__ == "__main__":
-    if not TOKEN:
-        raise SystemExit("DISCORD_TOKEN 환경변수를 설정하세요 (.env 사용 가능).")
-    if not VOICE_CHANNEL_ID or not REPORT_CHANNEL_ID:
-        raise SystemExit("VOICE_CHANNEL_ID / REPORT_CHANNEL_ID 환경변수를 설정하세요.")
     bot.run(TOKEN)
