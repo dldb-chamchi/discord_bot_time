@@ -1,11 +1,17 @@
 import os
+import json
+import asyncio
 import datetime as dt
+from pathlib import Path
+from typing import Dict, Any
+
 import discord
 from discord.ext import commands, tasks
-from pathlib import Path
 from dotenv import load_dotenv
 
-# ===== 환경 설정 =====
+# =========================
+# 환경 설정
+# =========================
 env_path = Path(__file__).resolve().parent / ".env"
 print(f"[DEBUG] loading env from {env_path}")
 load_dotenv(dotenv_path=env_path, override=True)
@@ -20,7 +26,9 @@ if not TOKEN:
 if not VOICE_CHANNEL_ID or not REPORT_CHANNEL_ID:
     raise SystemExit("VOICE_CHANNEL_ID / REPORT_CHANNEL_ID 환경변수를 설정하세요.")
 
-# ===== 유틸리티 =====
+# =========================
+# 유틸리티
+# =========================
 KST = dt.timezone(dt.timedelta(hours=9))
 
 def now_kst() -> dt.datetime:
@@ -32,16 +40,15 @@ def iso(dtobj: dt.datetime) -> str:
 def parse_iso(s: str) -> dt.datetime:
     return dt.datetime.fromisoformat(s)
 
-# ===== 상태 저장 =====
-import json
-from typing import Dict, Any
-
+# =========================
+# 상태 저장소
+# =========================
 class StateStore:
     def __init__(self, data_file: str):
         self.data_file = data_file
         self.state: Dict[str, Dict[str, Any]] = {
-            "totals": {},
-            "sessions": {}
+            "totals": {},   # user_id(str) -> 누적 초(int)
+            "sessions": {}  # user_id(str) -> 시작시각(ISO str)
         }
 
     def load(self):
@@ -69,26 +76,56 @@ class StateStore:
         if elapsed > 0:
             self.state["totals"][uid] = self.state["totals"].get(uid, 0) + elapsed
 
-# ===== 디스코드 봇 설정 =====
+# =========================
+# 디스코드 봇 설정
+# =========================
 intents = discord.Intents.default()
 intents.guilds = True
 intents.voice_states = True
+intents.members = True        # 서버 멤버 전체 접근에 필수
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 store = StateStore(DATA_FILE)
 
-# 채널 상태 관리 변수
-channel_active = False
-last_alert_time = None
-COOLDOWN_SECONDS = 10 * 60  # 10분
+# 채널 상태 관리
+channel_active = False          # 대상 음성 채널에 현재 사람이 있는지
+last_alert_time: dt.datetime | None = None
+COOLDOWN_SECONDS = 10 * 60      # 10분
 
+# =========================
+# 헬퍼: 멘션 분할 전송(2000자 제한 대비)
+# =========================
+async def send_mentions_in_chunks(report_ch: discord.abc.Messageable, members_to_ping: list[discord.Member], header_text: str = "", chunk_size: int = 40):
+    for i in range(0, len(members_to_ping), chunk_size):
+        chunk = members_to_ping[i:i+chunk_size]
+        mention_list = " ".join(m.mention for m in chunk)
+        text = f"{mention_list}\n{header_text}" if header_text else mention_list
+        await report_ch.send(text)
+
+# =========================
+# 이벤트: 준비 완료
+# =========================
 @bot.event
 async def on_ready():
     store.load()
+
+    # 선택) 대규모 서버에서 멤버 캐시 프리페치
+    # 필요 없으면 아래 블록을 주석 처리해도 됨
+    for g in bot.guilds:
+        try:
+            # 최신 discord.py에서는 async iterator 사용
+            async for _ in g.fetch_members(limit=None):
+                pass
+        except Exception:
+            pass
+
     daily_reporter.start()
     print(f"Logged in as {bot.user} (id={bot.user.id})")
 
+# =========================
+# 이벤트: 음성 상태 업데이트
+# =========================
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     global channel_active, last_alert_time
@@ -99,32 +136,51 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     before_id = before.channel.id if before.channel else None
     after_id = after.channel.id if after.channel else None
 
-    # 입장 처리
+    # ---------- 입장 처리 ----------
     if before_id != target_id and after_id == target_id:
         store.state["sessions"][uid] = iso(now_kst())
         store.save()
 
-        channel = after.channel
-        members = [m for m in channel.members if not m.bot]  # 봇 제외
+        voice_channel = after.channel
+        guild = member.guild
+        if not voice_channel or not guild:
+            return
 
-        # 아무도 없다가 처음 들어온 경우 & 쿨다운 체크
-        now = dt.datetime.now(tz=KST)
+        # 현재 채널의 (봇 제외) 멤버
+        members_in_channel = [m for m in voice_channel.members if not m.bot]
+
+        now = now_kst()
         cooldown_ok = (
             last_alert_time is None or
             (now - last_alert_time).total_seconds() > COOLDOWN_SECONDS
         )
 
-        if not channel_active and members and cooldown_ok:
+        # 아무도 없다가 처음 들어온 경우 + 쿨다운 통과
+        if not channel_active and members_in_channel and cooldown_ok:
             channel_active = True
             last_alert_time = now
 
-            mention_list = " ".join(m.mention for m in members)
+            # 동시 입장 보정
+            await asyncio.sleep(1)
+
+            # 길드 전체 멤버 중에서 "해당 음성 채널에 없는" 멤버(봇 제외)
+            members_not_in_channel = [
+                m for m in guild.members
+                if not m.bot and m not in voice_channel.members
+            ]
+
             report_ch = bot.get_channel(REPORT_CHANNEL_ID) or await bot.fetch_channel(REPORT_CHANNEL_ID)
-            await report_ch.send(f"{mention_list}\n음성 채널 **{channel.name}**에 멤버가 있습니다!")
+            header = f'음성 채널 **{voice_channel.name}**에 멤버가 있습니다!'
+
+            if members_not_in_channel:
+                await send_mentions_in_chunks(report_ch, members_not_in_channel, header_text=header, chunk_size=40)
+            else:
+                # 멘션할 대상이 없더라도 헤더는 남김
+                await report_ch.send(header)
 
         return
 
-    # 퇴장 처리
+    # ---------- 퇴장 처리 ----------
     if before_id == target_id and after_id != target_id:
         store.add_session_time(member.id)
         store.state["sessions"].pop(uid, None)
@@ -136,17 +192,21 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
         return
 
-# ===== 주간 리포트 =====
+# =========================
+# 주간 리포트(일요일 23:00 KST = 14:00 UTC)
+# =========================
 @tasks.loop(time=dt.time(hour=14, minute=0, tzinfo=dt.timezone.utc))
 async def daily_reporter():
     now = now_kst()
     if now.weekday() != 6:
         return
 
+    # 진행 중 세션 반영
     for uid in list(store.state["sessions"].keys()):
         store.add_session_time(int(uid), until=now)
         store.state["sessions"][uid] = iso(now)
 
+    # 리포트 본문
     if not store.state["totals"]:
         content = "이번 주 대상 음성 채널 체류 기록이 없습니다."
     else:
@@ -157,6 +217,7 @@ async def daily_reporter():
             lines.append(f"- <@{uid}>: {hours:.2f}h")
         content = "\n".join(lines)
 
+    # 전송 및 초기화
     channel = bot.get_channel(REPORT_CHANNEL_ID) or await bot.fetch_channel(REPORT_CHANNEL_ID)
     try:
         await channel.send(content)
@@ -164,7 +225,9 @@ async def daily_reporter():
         store.state["totals"] = {}
         store.save()
 
-# ===== 명령어 =====
+# =========================
+# 명령어: 누적 시간 조회
+# =========================
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def voicetime(ctx):
@@ -178,5 +241,8 @@ async def voicetime(ctx):
         lines.append(f"<@{uid}>: {hours:.2f}h")
     await ctx.send("\n".join(lines))
 
+# =========================
+# 실행
+# =========================
 if __name__ == "__main__":
     bot.run(TOKEN)
