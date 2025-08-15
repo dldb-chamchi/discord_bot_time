@@ -230,7 +230,7 @@ async def daily_reporter():
 # =========================
 @bot.command()
 @commands.has_permissions(administrator=True)
-async def 누적시간(ctx):
+async def voicetime(ctx):
     if not store.state["totals"]:
         await ctx.send("현재 누적 데이터가 없습니다.")
         return
