@@ -8,6 +8,7 @@ from typing import Dict, Any
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from menu_recommender import MenuRecommender
 
 # =========================
 # 환경 설정
@@ -87,6 +88,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 store = StateStore(DATA_FILE)
+recommender = MenuRecommender()
 
 # 채널 상태 관리
 channel_active = False          # 대상 음성 채널에 현재 사람이 있는지
@@ -122,6 +124,13 @@ async def on_ready():
 
     daily_reporter.start()
     print(f"Logged in as {bot.user} (id={bot.user.id})")
+
+        # 슬래시 명령 동기화
+    try:
+        synced = await bot.tree.sync()
+        print(f"[DEBUG] slash commands synced: {len(synced)}")
+    except Exception as e:
+        print(f"[DEBUG] slash sync error: {e}")
 
 # =========================
 # 이벤트: 음성 상태 업데이트
@@ -240,6 +249,28 @@ async def voicetime(ctx):
         hours = sec / 3600.0
         lines.append(f"<@{uid}>: {hours:.2f}h")
     await ctx.send("\n".join(lines))
+
+@bot.tree.command(name="menu", description="무작위로 메뉴를 추천합니다.")
+async def menu(interaction: discord.Interaction):
+    recommender.reload()
+    gid = interaction.guild_id
+    uid = interaction.user.id if interaction.user else None
+    picked = recommender.recommend(guild_id=gid, user_id=uid)
+    if not picked:
+        await interaction.response.send_message("추천할 메뉴가 없습니다.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"오늘은 **{picked['name']}** 어떠세요?")
+
+@bot.command(name="menu")
+async def menu_prefix(ctx: commands.Context):
+    recommender.reload()
+    gid = ctx.guild.id if ctx.guild else None
+    uid = ctx.author.id if ctx.author else None
+    picked = recommender.recommend(guild_id=gid, user_id=uid)
+    if not picked:
+        await ctx.send("추천할 메뉴가 없습니다.")
+        return
+    await ctx.send(f"오늘은 **{picked['name']}** 어떠세요?")
 
 # =========================
 # 실행
