@@ -2,7 +2,7 @@ name: Deploy Bot (deploy user)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main" ]   # PR이 아니라 push에서만 돌도록
 
 jobs:
   deploy:
@@ -10,18 +10,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 첫 접속 경고 방지 + MITM 방어 보조
+      - name: Validate secrets
+        run: |
+          for v in DEPLOY_HOST DEPLOY_USER DEPLOY_KEY DEPLOY_KEY_PASSPHRASE; do
+            if [ -z "${{ secrets[$v] }}" ]; then
+              echo "::warning::$v is empty (this may be fine if you didn't set a passphrase)."
+            fi
+          done
+
       - name: Add server to known_hosts
         run: |
+          if [ -z "${{ secrets.DEPLOY_HOST }}" ]; then
+            echo "::error::DEPLOY_HOST secret is empty. Set it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
           mkdir -p ~/.ssh
-          ssh-keyscan -p 22 ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -p 22 ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          passphrase: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}   # 패스프레이즈 사용 중
+          passphrase: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}
           script: |
             /home/deploy/discord_bot_time/redeploy.sh
