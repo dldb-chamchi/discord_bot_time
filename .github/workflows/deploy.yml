@@ -47,3 +47,5 @@ jobs:
           passphrase: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}
           script: |
             /home/deploy/discord_bot_time/redeploy.sh
+
+#시크릿 키 수정
