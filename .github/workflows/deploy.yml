@@ -38,7 +38,7 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p 22 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy via SSH
+      - name: Deploy via SSH (run redeploy.sh under $HOME)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -46,6 +46,13 @@ jobs:
           key: ${{ secrets.DEPLOY_KEY }}
           passphrase: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}
           script: |
-            /home/deploy/discord_bot_time/redeploy.sh
-
-#시크릿 키 수정
+            set -euo pipefail
+            echo "whoami=$(whoami) HOME=$HOME"
+            SCRIPT="$HOME/discord_bot_time/redeploy.sh"
+            if [ ! -f "$SCRIPT" ]; then
+              echo "::error::$SCRIPT not found"
+              ls -al "$HOME/discord_bot_time" || true
+              exit 127
+            fi
+            chmod +x "$SCRIPT"
+            "$SCRIPT"
