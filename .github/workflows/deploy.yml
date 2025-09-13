@@ -43,8 +43,7 @@ jobs:
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}             # 개인키 '내용' 전체
+          key: ${{ secrets.DEPLOY_KEY }}
           passphrase: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}
-          # 필요 시: port: 22
           script: |
             /home/deploy/discord_bot_time/redeploy.sh
