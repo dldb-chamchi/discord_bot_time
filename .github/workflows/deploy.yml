@@ -2,37 +2,49 @@ name: Deploy Bot (deploy user)
 
 on:
   push:
-    branches: [ "main" ]   # PR이 아니라 push에서만 돌도록
+    branches: [ "main" ]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+      DEPLOY_KEY_PASSPHRASE: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Validate secrets
+        shell: bash
         run: |
+          set -euo pipefail
           for v in DEPLOY_HOST DEPLOY_USER DEPLOY_KEY DEPLOY_KEY_PASSPHRASE; do
-            if [ -z "${{ secrets[$v] }}" ]; then
+            if [ -z "${!v:-}" ]; then
               echo "::warning::$v is empty (this may be fine if you didn't set a passphrase)."
             fi
           done
 
       - name: Add server to known_hosts
+        shell: bash
         run: |
-          if [ -z "${{ secrets.DEPLOY_HOST }}" ]; then
+          set -euo pipefail
+          if [ -z "${DEPLOY_HOST:-}" ]; then
             echo "::error::DEPLOY_HOST secret is empty. Set it in Settings > Secrets and variables > Actions."
             exit 1
           fi
           mkdir -p ~/.ssh
-          ssh-keyscan -p 22 ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -p 22 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}
+          key: ${{ secrets.DEPLOY_KEY }}             # 개인키 '내용' 전체
           passphrase: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}
+          # 필요 시: port: 22
           script: |
             /home/deploy/discord_bot_time/redeploy.sh
