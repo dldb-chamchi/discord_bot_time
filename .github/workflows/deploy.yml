@@ -22,7 +22,6 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          passphrase: ${{ secrets.DEPLOY_KEY_PASSPHRASE }}
           script: |
             # 스크립트 실행 중 오류가 발생하면 즉시 중단합니다.
             set -e
