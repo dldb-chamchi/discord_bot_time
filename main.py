@@ -19,12 +19,13 @@ load_dotenv(dotenv_path=env_path, override=True)
 
 TOKEN = os.getenv("DISCORD_TOKEN", "")
 VOICE_CHANNEL_ID = int(os.getenv("VOICE_CHANNEL_ID", "0"))
-REPORT_CHANNEL_ID = int(os.getenv("REPORT_CHANNEL_ID", "0"))
+REPORT_CHANNEL_ID_ENTER = int(os.getenv("REPORT_CHANNEL_ID_ENTER", "0"))
+REPORT_CHANNEL_ID_TOEIC = int(os.getenv("REPORT_CHANNEL_ID_TOEIC", "0"))
 DATA_FILE = os.getenv("DATA_FILE", "voice_time.json")
 
 if not TOKEN:
     raise SystemExit("DISCORD_TOKEN 환경변수를 설정하세요 (.env 사용 가능).")
-if not VOICE_CHANNEL_ID or not REPORT_CHANNEL_ID:
+if not VOICE_CHANNEL_ID or not REPORT_CHANNEL_ID_ENTER or not REPORT_CHANNEL_ID_TOEIC:
     raise SystemExit("VOICE_CHANNEL_ID / REPORT_CHANNEL_ID 환경변수를 설정하세요.")
 
 # =========================
@@ -123,9 +124,13 @@ async def on_ready():
             pass
 
     daily_reporter.start()
+    ##### 추가된 부분 시작 #####
+    scheduled_message.start() # 새로 추가한 정기 메시지 태스크를 시작합니다.
+    ##### 추가된 부분 끝 #####
+    
     print(f"Logged in as {bot.user} (id={bot.user.id})")
 
-        # 슬래시 명령 동기화
+    # 슬래시 명령 동기화
     try:
         synced = await bot.tree.sync()
         print(f"[DEBUG] slash commands synced: {len(synced)}")
@@ -178,7 +183,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 if not m.bot and m not in voice_channel.members
             ]
 
-            report_ch = bot.get_channel(REPORT_CHANNEL_ID) or await bot.fetch_channel(REPORT_CHANNEL_ID)
+            report_ch = bot.get_channel(REPORT_CHANNEL_ID_ENTER) or await bot.fetch_channel(REPORT_CHANNEL_ID_ENTER)
             header = f'음성 채널 **{voice_channel.name}**에 멤버가 있습니다!'
 
             if members_not_in_channel:
@@ -227,12 +232,26 @@ async def daily_reporter():
         content = "\n".join(lines)
 
     # 전송 및 초기화
-    channel = bot.get_channel(REPORT_CHANNEL_ID) or await bot.fetch_channel(REPORT_CHANNEL_ID)
+    channel = bot.get_channel(REPORT_CHANNEL_ID_ENTER) or await bot.fetch_channel(REPORT_CHANNEL_ID_ENTER)
     try:
         await channel.send(content)
     finally:
         store.state["totals"] = {}
         store.save()
+
+##### 추가된 부분 시작 #####
+# =========================
+# 정기 메시지 (화/목/토 22:00 KST = 13:00 UTC)
+# =========================
+@tasks.loop(time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
+async def scheduled_message():
+    now = now_kst()
+    # now.weekday()는 월요일=0, 화요일=1, ..., 토요일=5, 일요일=6
+    if now.weekday() in [0, 2, 4]: # 화, 목, 토에만 실행
+        channel = bot.get_channel(REPORT_CHANNEL_ID_TOEIC) or await bot.fetch_channel(REPORT_CHANNEL_ID_TOEIC)
+        message = "🔥 토익 인증~ 12시 전까지 노션에다가 인증 올리기!🔥"
+        await channel.send(message)
+##### 추가된 부분 끝 #####
 
 # =========================
 # 명령어: 누적 시간 조회
