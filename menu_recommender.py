@@ -11,13 +11,32 @@ HISTORY_FILE = DATA_DIR / "menu_history.json"
 COOLDOWN_SECONDS = 3 * 24 * 60 * 60  # 최근 3일 회피
 
 def _load_json(path: Path, default):
+    # 디버깅을 위해 절대 경로를 출력합니다.
+    abs_path = path.resolve()
+    print(f"[DEBUG] JSON 파일 로드 시도: {abs_path}")
+
     if not path.exists():
+        print(f"[DEBUG] 오류: 파일을 찾을 수 없습니다.")
         return default
-    with path.open("r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return default
+    
+    print(f"[DEBUG] 성공: 파일을 찾았습니다.")
+    
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            content = f.read()
+            if not content.strip():
+                print("[DEBUG] 오류: 파일 내용이 비어있습니다.")
+                return default
+            
+            data = json.loads(content)
+            print(f"[DEBUG] 성공: JSON 파싱 완료. {len(data)}개의 메뉴를 불러왔습니다.")
+            return data
+    except json.JSONDecodeError as e:
+        print(f"[DEBUG] 오류: JSON 형식이 올바르지 않습니다. {e}")
+        return default
+    except Exception as e:
+        print(f"[DEBUG] 오류: 파일을 읽는 중 예외가 발생했습니다. {e}")
+        return default
 
 def _save_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
