@@ -22,6 +22,7 @@ VOICE_CHANNEL_ID = int(os.getenv("VOICE_CHANNEL_ID", "0"))
 REPORT_CHANNEL_ID_ENTER = int(os.getenv("REPORT_CHANNEL_ID_ENTER", "0"))
 REPORT_CHANNEL_ID_TOEIC = int(os.getenv("REPORT_CHANNEL_ID_TOEIC", "0"))
 DATA_FILE = os.getenv("DATA_FILE", "voice_time.json")
+MENTION_CHANNEL_ID = int(os.getenv("MENTION_CHANNEL_ID", "0"))
 
 if not TOKEN:
     raise SystemExit("DISCORD_TOKEN 환경변수를 설정하세요 (.env 사용 가능).")
@@ -136,6 +137,107 @@ async def on_ready():
         print(f"[DEBUG] slash commands synced: {len(synced)}")
     except Exception as e:
         print(f"[DEBUG] slash sync error: {e}")
+
+# =========================
+# 이벤트: 일반 메시지 처리 (닉네임 멘션 단축키)
+# 예) "!홍길동" 입력 시 서버의 해당 멤버를 멘션
+# =========================
+@bot.event
+async def on_message(message: discord.Message):
+    # 봇 메시지/DM은 무시하고, 기존 명령어는 그대로 처리
+    if message.author.bot:
+        return
+    content = (message.content or "").strip()
+    if not content.startswith("!"):
+        await bot.process_commands(message)
+        return
+
+    # DM 채널이면 통과
+    if not message.guild:
+        await bot.process_commands(message)
+        return
+
+    # 명령어 이름 추출 (형식: !이름 [추가메시지])
+    raw = content[1:].strip()
+    if not raw:
+        await bot.process_commands(message)
+        return
+
+    # 기존 접두사 명령어는 패스
+    base_cmd = raw.split()[0].lower()
+    if base_cmd in {"menu", "voicetime"}:
+        await bot.process_commands(message)
+        return
+
+    # 닉네임/표시명/유저명 매칭으로 멘션 시도
+    def normalize(s: str) -> str:
+        return (s or "").replace(" ", "").lower()
+
+    # 이름만 사용 (고정 메시지 전송)
+    if " " in raw:
+        target = raw.split(" ", 1)[0]
+    else:
+        target = raw
+    target_n = normalize(target)
+
+    def is_match(m: discord.Member) -> bool:
+        display = getattr(m, "display_name", "")
+        uname = getattr(m, "name", "")
+        gname = getattr(m, "global_name", None) or ""
+        return (
+            normalize(display) == target_n or
+            normalize(uname) == target_n or
+            normalize(gname) == target_n
+        )
+
+    members = [m for m in message.guild.members if not m.bot]
+    exact_matches = [m for m in members if is_match(m)]
+
+    # 멘션을 보낼 대상 텍스트 채널 결정
+    if MENTION_CHANNEL_ID:
+        target_ch = bot.get_channel(MENTION_CHANNEL_ID) or await bot.fetch_channel(MENTION_CHANNEL_ID)
+    else:
+        target_ch = message.channel
+
+    async def reply_candidates(cands: list[discord.Member]):
+        names = ", ".join(m.display_name for m in cands[:5])
+        more = " 등" if len(cands) > 5 else ""
+        await target_ch.send(f"여러 명이 일치합니다: {names}{more}")
+
+    def compose_with_extra(mention: str) -> str:
+        return f"{mention}님 디스코드 확인하세요!"
+
+    if len(exact_matches) == 1:
+        await target_ch.send(compose_with_extra(exact_matches[0].mention))
+        await bot.process_commands(message)
+        return
+    elif len(exact_matches) > 1:
+        # 동일 표기 다수면 후보 안내
+        await reply_candidates(exact_matches)
+        await bot.process_commands(message)
+        return
+
+    # 부분 일치로 보조 탐색
+    def is_partial(m: discord.Member) -> bool:
+        display = getattr(m, "display_name", "")
+        uname = getattr(m, "name", "")
+        gname = getattr(m, "global_name", None) or ""
+        return (
+            target_n in normalize(display) or
+            target_n in normalize(uname) or
+            target_n in normalize(gname)
+        )
+
+    partials = [m for m in members if is_partial(m)]
+    if len(partials) == 1:
+        await target_ch.send(compose_with_extra(partials[0].mention))
+    elif len(partials) > 1:
+        await reply_candidates(partials)
+    else:
+        await target_ch.send("해당 이름을 가진 멤버를 찾지 못했습니다.")
+
+    # 다른 명령어 계속 처리
+    await bot.process_commands(message)
 
 # =========================
 # 이벤트: 음성 상태 업데이트
