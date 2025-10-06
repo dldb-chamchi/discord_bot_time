@@ -343,13 +343,13 @@ async def daily_reporter():
 
 ##### 추가된 부분 시작 #####
 # =========================
-# 정기 메시지 (월 수 금 22:00 KST = 13:00 UTC)
+# 정기 메시지 (월 수 토 22:00 KST = 13:00 UTC)
 # =========================
 @tasks.loop(time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
 async def scheduled_message():
     now = now_kst()
     # now.weekday()는 월요일=0, 화요일=1, ..., 토요일=5, 일요일=6
-    if now.weekday() in [0, 2, 4]: # 월, 수, 금
+    if now.weekday() in [0, 2, 5]: # 월, 수, 토
         channel = bot.get_channel(REPORT_CHANNEL_ID_TOEIC) or await bot.fetch_channel(REPORT_CHANNEL_ID_TOEIC)
         message = "🔥 토익 인증~ 12시 전까지 노션에다가 인증 올리기!🔥"
         await channel.send(message)
