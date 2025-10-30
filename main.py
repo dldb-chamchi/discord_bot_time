@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from menu_recommender import MenuRecommender
+from notion_client import AsyncClient as NotionClient
 
 # =========================
 # 환경 설정
@@ -23,6 +24,11 @@ REPORT_CHANNEL_ID_ENTER = int(os.getenv("REPORT_CHANNEL_ID_ENTER", "0"))
 REPORT_CHANNEL_ID_TOEIC = int(os.getenv("REPORT_CHANNEL_ID_TOEIC", "0"))
 DATA_FILE = os.getenv("DATA_FILE", "voice_time.json")
 MENTION_CHANNEL_ID = int(os.getenv("MENTION_CHANNEL_ID", "0"))
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_FEATURE_ID", "")
+
+# 노션 변경 감지에 쓸 상태 저장
+last_notion_row_ids = set()
 
 if not TOKEN:
     raise SystemExit("DISCORD_TOKEN 환경변수를 설정하세요 (.env 사용 가능).")
@@ -127,6 +133,7 @@ async def on_ready():
     daily_reporter.start()
     ##### 추가된 부분 시작 #####
     scheduled_message.start() # 새로 추가한 정기 메시지 태스크를 시작합니다.
+    notion_update_poller.start() # 노션 업데이트 폴링 태스크를 시작합니다.
     ##### 추가된 부분 끝 #####
     
     print(f"Logged in as {bot.user} (id={bot.user.id})")
@@ -354,6 +361,37 @@ async def scheduled_message():
         message = "🔥 토익 인증~ 12시 전까지 노션에다가 인증 올리기!🔥"
         await channel.send(message)
 ##### 추가된 부분 끝 #####
+
+# =========================
+# 노션 업데이트 폴링
+# =========================
+@tasks.loop(seconds=60)  # 60초 주기 폴링
+async def notion_update_poller():
+    global last_notion_row_ids
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
+        return  # 설정이 없으면 실행 안 함
+    try:
+        notion = NotionClient(auth=NOTION_TOKEN)
+        result = await notion.databases.query(database_id=NOTION_DATABASE_ID, page_size=5)
+        rows = result.get("results", [])
+        new_row_ids = set(row["id"] for row in rows)
+        # 업데이트 감지(가장 최근 5개 row 기준, ID가 새로 들어왔는지 판단)
+        only_new = new_row_ids - last_notion_row_ids
+        if only_new:
+            # 신규 항목만 추출하여 알림
+            msg_lines = [f"노션 DB에 새로운 항목이 추가되었습니다!"]
+            for row in rows:
+                if row["id"] in only_new:
+                    title = row["properties"].get("이름", {}).get("title", [])
+                    if title and len(title) > 0:
+                        display = ''.join([t.get("plain_text","") for t in title])
+                        msg_lines.append(f"- {display}")
+            # 디스코드 채널로 메시지 발송(VOICE_CHANNEL_ID 사용 예시)
+            channel = bot.get_channel(VOICE_CHANNEL_ID) or await bot.fetch_channel(VOICE_CHANNEL_ID)
+            await channel.send("\n".join(msg_lines))
+        last_notion_row_ids = new_row_ids
+    except Exception as e:
+        print(f"[NOTION] Error: {e}")
 
 # =========================
 # 명령어: 누적 시간 조회
