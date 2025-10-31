@@ -27,10 +27,18 @@ MENTION_CHANNEL_ID = int(os.getenv("MENTION_CHANNEL_ID", "0"))
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
 NOTION_DATABASE_FEATURE_ID = os.getenv("NOTION_DATABASE_FEATURE_ID", "")
 REPORT_CHANNEL_ID_FEATURE = int(os.getenv("REPORT_CHANNEL_ID_FEATURE", "0"))
+# 새로 추가: BOARD DB와 ALARM 채널
+NOTION_DATABASE_BOARD_ID = os.getenv("NOTION_DATABASE_BOARD_ID", "")
+REPORT_CHANNEL_ID_ALARM = int(os.getenv("REPORT_CHANNEL_ID_ALARM", "0"))
+# 새로 추가: SCHEDULE DB
+NOTION_DATABASE_SCHEDULE_ID = os.getenv("NOTION_DATABASE_SCHEDULE_ID", "")
 
 # 노션 변경 감지에 쓸 상태 저장
 last_notion_row_ids = set()
 last_feature_status_by_id: dict[str, str] = {}
+# 새로 추가: BOARD/SCHEDULE DB 최근 행 추적
+last_board_row_ids = set()
+last_schedule_row_ids = set()
 
 if not TOKEN:
     raise SystemExit("DISCORD_TOKEN 환경변수를 설정하세요 (.env 사용 가능).")
@@ -60,6 +68,16 @@ def _is_completed_status(name: str) -> bool:
 
 def _any_completed(status_names: list[str]) -> bool:
     return any(_is_completed_status(n) for n in status_names)
+
+# ISO 문자열을 'YYYY-MM-DD HH:MM'까지로 잘라주는 헬퍼
+def _trim_to_minute(iso_str: str) -> str:
+    if not iso_str:
+        return ""
+    if "T" in iso_str:
+        date_part, time_part = iso_str.split("T", 1)
+        hhmm = time_part[:5]  # HH:MM만 사용
+        return f"{date_part} {hhmm}"
+    return iso_str
 
 # =========================
 # 상태 저장소
@@ -381,7 +399,7 @@ async def scheduled_message():
 # =========================
 @tasks.loop(seconds=60)  # 60초 주기 폴링
 async def notion_update_poller():
-    global last_notion_row_ids, last_feature_status_by_id
+    global last_notion_row_ids, last_feature_status_by_id, last_board_row_ids, last_schedule_row_ids
     if not NOTION_TOKEN or not NOTION_DATABASE_FEATURE_ID:
         return  # 설정이 없으면 실행 안 함
     try:
@@ -393,7 +411,7 @@ async def notion_update_poller():
         )
         rows = result.get("results", [])
         new_row_ids = set(row["id"] for row in rows)
-        # 1) 신규 행 감지
+        # 1) FEATURE: 신규 행 감지 및 완료/요청 분기
         only_new = new_row_ids - last_notion_row_ids
         if only_new:
             new_request_lines: list[str] = []
@@ -554,10 +572,29 @@ async def notion_update_poller():
             except Exception:
                 pass
             await channel.send("\n".join([header] + status_change_lines))
-        # 마지막에 ID 집합 동기화
-        last_notion_row_ids = new_row_ids
-    except Exception as e:
-        print(f"[NOTION] Error: {e}")
+        # 3) BOARD: 신규 페이지 감지 → ALARM 채널 통지
+        if NOTION_DATABASE_BOARD_ID and REPORT_CHANNEL_ID_ALARM:
+            try:
+                board_res = await notion.databases.query(
+                    database_id=NOTION_DATABASE_BOARD_ID,
+                    page_size=20,
+                    sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+                )
+                board_rows = board_res.get("results", [])
+                board_ids = set(row["id"] for row in board_rows)
+                board_new = board_ids - last_board_row_ids
+                if board_new:
+                    channel = bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
+                    msg = "게시판에 새로운 글이 올라왔습니다."
+                    try:
+                        print(f"[NOTION][BOARD] new_count={len(board_new)} -> ALARM")
+                    except Exception:
+                        pass
+                    await channel.send(msg)
+                last_board_row_ids = board_ids
+            except Exception as e:
+                print(f"[NOTION][BOARD] Error: {e}")
+
 
 # =========================
 # 명령어: 누적 시간 조회
