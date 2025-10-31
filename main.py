@@ -25,10 +25,12 @@ REPORT_CHANNEL_ID_TOEIC = int(os.getenv("REPORT_CHANNEL_ID_TOEIC", "0"))
 DATA_FILE = os.getenv("DATA_FILE", "voice_time.json")
 MENTION_CHANNEL_ID = int(os.getenv("MENTION_CHANNEL_ID", "0"))
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_FEATURE_ID", "")
+NOTION_DATABASE_FEATURE_ID = os.getenv("NOTION_DATABASE_FEATURE_ID", "")
+REPORT_CHANNEL_ID_FEATURE = int(os.getenv("REPORT_CHANNEL_ID_FEATURE", "0"))
 
 # 노션 변경 감지에 쓸 상태 저장
 last_notion_row_ids = set()
+last_feature_status_by_id: dict[str, str] = {}
 
 if not TOKEN:
     raise SystemExit("DISCORD_TOKEN 환경변수를 설정하세요 (.env 사용 가능).")
@@ -48,6 +50,16 @@ def iso(dtobj: dt.datetime) -> str:
 
 def parse_iso(s: str) -> dt.datetime:
     return dt.datetime.fromisoformat(s)
+
+# 상태 완료 판정 헬퍼
+def _is_completed_status(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    return ("완료" in n) or (n in {"done", "completed", "complete"})
+
+def _any_completed(status_names: list[str]) -> bool:
+    return any(_is_completed_status(n) for n in status_names)
 
 # =========================
 # 상태 저장소
@@ -132,8 +144,10 @@ async def on_ready():
 
     daily_reporter.start()
     ##### 추가된 부분 시작 #####
-    scheduled_message.start() # 새로 추가한 정기 메시지 태스크를 시작합니다.
-    notion_update_poller.start() # 노션 업데이트 폴링 태스크를 시작합니다.
+    if not scheduled_message.is_running():
+        scheduled_message.start() # 새로 추가한 정기 메시지 태스크를 시작합니다.
+    if not notion_update_poller.is_running():
+        notion_update_poller.start() # 노션 업데이트 폴링 태스크를 시작합니다.
     ##### 추가된 부분 끝 #####
     
     print(f"Logged in as {bot.user} (id={bot.user.id})")
@@ -367,28 +381,180 @@ async def scheduled_message():
 # =========================
 @tasks.loop(seconds=60)  # 60초 주기 폴링
 async def notion_update_poller():
-    global last_notion_row_ids
-    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
+    global last_notion_row_ids, last_feature_status_by_id
+    if not NOTION_TOKEN or not NOTION_DATABASE_FEATURE_ID:
         return  # 설정이 없으면 실행 안 함
     try:
         notion = NotionClient(auth=NOTION_TOKEN)
-        result = await notion.databases.query(database_id=NOTION_DATABASE_ID, page_size=5)
+        result = await notion.databases.query(
+            database_id=NOTION_DATABASE_FEATURE_ID,
+            page_size=50,
+            sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+        )
         rows = result.get("results", [])
         new_row_ids = set(row["id"] for row in rows)
-        # 업데이트 감지(가장 최근 5개 row 기준, ID가 새로 들어왔는지 판단)
+        # 1) 신규 행 감지
         only_new = new_row_ids - last_notion_row_ids
         if only_new:
-            # 신규 항목만 추출하여 알림
-            msg_lines = [f"노션 DB에 새로운 항목이 추가되었습니다!"]
+            new_request_lines: list[str] = []
+            new_completed_lines: list[str] = []
             for row in rows:
                 if row["id"] in only_new:
-                    title = row["properties"].get("이름", {}).get("title", [])
-                    if title and len(title) > 0:
-                        display = ''.join([t.get("plain_text","") for t in title])
-                        msg_lines.append(f"- {display}")
-            # 디스코드 채널로 메시지 발송(VOICE_CHANNEL_ID 사용 예시)
-            channel = bot.get_channel(VOICE_CHANNEL_ID) or await bot.fetch_channel(VOICE_CHANNEL_ID)
-            await channel.send("\n".join(msg_lines))
+                    rid = row["id"]
+                    props = row.get("properties", {})
+                    # 상태 이름 추출 (이름 '상태' 우선, 없으면 status/select 타입 컬럼 자동 탐지)
+                    status_names: list[str] = []
+                    status_prop = props.get("상태") or {}
+                    picked_status_key = "상태" if status_prop else None
+                    if not status_prop:
+                        for k, v in props.items():
+                            if isinstance(v, dict) and v.get("type") in ("status", "select", "multi_select"):
+                                status_prop = v
+                                picked_status_key = k
+                                break
+                    if isinstance(status_prop, dict):
+                        ptype = status_prop.get("type")
+                        if ptype == "status":
+                            st = status_prop.get("status") or {}
+                            val = (st.get("name") or "").strip()
+                            if val:
+                                status_names.append(val)
+                        elif ptype == "select":
+                            st = status_prop.get("select") or {}
+                            val = (st.get("name") or "").strip()
+                            if val:
+                                status_names.append(val)
+                        elif ptype == "multi_select":
+                            arr = status_prop.get("multi_select", []) or []
+                            for opt in arr:
+                                val = (opt.get("name") or "").strip()
+                                if val:
+                                    status_names.append(val)
+                    # 내용 추출 (rich_text 우선, 없으면 title)
+                    content_text = ""
+                    content_prop = props.get("내용") or {}
+                    if isinstance(content_prop, dict):
+                        ctype = content_prop.get("type")
+                        if ctype == "rich_text":
+                            arr = content_prop.get("rich_text", [])
+                            content_text = ''.join([t.get("plain_text", "") for t in arr]).strip()
+                        elif ctype == "title":
+                            arr = content_prop.get("title", [])
+                            content_text = ''.join([t.get("plain_text", "") for t in arr]).strip()
+                    if not content_text:
+                        content_text = "(내용 없음)"
+                    # 설명 추출 (rich_text)
+                    desc_text = ""
+                    desc_prop = props.get("설명") or props.get("Description") or {}
+                    if isinstance(desc_prop, dict) and desc_prop.get("type") == "rich_text":
+                        arr = desc_prop.get("rich_text", [])
+                        desc_text = ''.join([t.get("plain_text", "") for t in arr]).strip()
+                    if not desc_text:
+                        desc_text = "(설명 없음)"
+                    line = f"- {content_text} — {desc_text}"
+                    # 완료 판정
+                    if _any_completed(status_names):
+                        new_completed_lines.append(line)
+                    else:
+                        new_request_lines.append(line)
+                    # 디버그 로그
+                    try:
+                        print(f"[NOTION][NEW] row={rid} status_key='{picked_status_key}' status='{','.join(status_names)}' classified_as={'completed' if _any_completed(status_names) else 'request'}")
+                    except Exception:
+                        pass
+                    # 신규 행의 상태를 기록 (콤마로 합쳐 저장)
+                    if status_names:
+                        last_feature_status_by_id[rid] = ",".join(status_names)
+            channel = bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
+            if new_request_lines:
+                header = "기능 요청이 들어왔습니다 ✨"
+                try:
+                    print("[NOTION][NEW] sending request notifications:\n" + "\n".join([header] + new_request_lines))
+                except Exception:
+                    pass
+                await channel.send("\n".join([header] + new_request_lines))
+            if new_completed_lines:
+                header = "기능이 추가됐습니다 ✅"
+                try:
+                    print("[NOTION][DONE] sending completion notifications:\n" + "\n".join([header] + new_completed_lines))
+                except Exception:
+                    pass
+                await channel.send("\n".join([header] + new_completed_lines))
+        # 2) 상태 변경 감지 (상태 → 완료)
+        status_change_lines: list[str] = []
+        for row in rows:
+            rid = row["id"]
+            props = row.get("properties", {})
+            status_names: list[str] = []
+            status_prop = props.get("상태") or {}
+            picked_status_key = "상태" if status_prop else None
+            if not status_prop:
+                for k, v in props.items():
+                    if isinstance(v, dict) and v.get("type") in ("status", "select", "multi_select"):
+                        status_prop = v
+                        picked_status_key = k
+                        break
+            if isinstance(status_prop, dict):
+                ptype = status_prop.get("type")
+                if ptype == "status":
+                    st = status_prop.get("status") or {}
+                    val = (st.get("name") or "").strip()
+                    if val:
+                        status_names.append(val)
+                elif ptype == "select":
+                    st = status_prop.get("select") or {}
+                    val = (st.get("name") or "").strip()
+                    if val:
+                        status_names.append(val)
+                elif ptype == "multi_select":
+                    arr = status_prop.get("multi_select", []) or []
+                    for opt in arr:
+                        val = (opt.get("name") or "").strip()
+                        if val:
+                            status_names.append(val)
+            prev = last_feature_status_by_id.get(rid)
+            prev_completed = _any_completed([p.strip() for p in (prev.split(",") if prev else [])])
+            curr_completed = _any_completed(status_names)
+            # 완료로 전환되었을 때만 메시지 후보 생성
+            if curr_completed and not prev_completed:
+                # 내용
+                content_text = ""
+                content_prop = props.get("내용") or {}
+                if isinstance(content_prop, dict):
+                    ctype = content_prop.get("type")
+                    if ctype == "rich_text":
+                        arr = content_prop.get("rich_text", [])
+                        content_text = ''.join([t.get("plain_text", "") for t in arr]).strip()
+                    elif ctype == "title":
+                        arr = content_prop.get("title", [])
+                        content_text = ''.join([t.get("plain_text", "") for t in arr]).strip()
+                if not content_text:
+                    content_text = "(내용 없음)"
+                # 설명
+                desc_text = ""
+                desc_prop = props.get("설명") or props.get("Description") or {}
+                if isinstance(desc_prop, dict) and desc_prop.get("type") == "rich_text":
+                    arr = desc_prop.get("rich_text", [])
+                    desc_text = ''.join([t.get("plain_text", "") for t in arr]).strip()
+                if not desc_text:
+                    desc_text = "(설명 없음)"
+                status_change_lines.append(f"- {content_text} — {desc_text}")
+            # 상태 최신화 저장 및 디버그
+            if status_names:
+                last_feature_status_by_id[rid] = ",".join(status_names)
+                try:
+                    print(f"[NOTION][STATE] row={rid} key='{picked_status_key}' prev='{prev}' curr='{','.join(status_names)}'")
+                except Exception:
+                    pass
+        if status_change_lines:
+            header = "기능이 추가됐습니다 ✅"
+            channel = bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
+            try:
+                print("[NOTION][DONE] status changed to 완료:\n" + "\n".join([header] + status_change_lines))
+            except Exception:
+                pass
+            await channel.send("\n".join([header] + status_change_lines))
+        # 마지막에 ID 집합 동기화
         last_notion_row_ids = new_row_ids
     except Exception as e:
         print(f"[NOTION] Error: {e}")
