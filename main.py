@@ -594,7 +594,92 @@ async def notion_update_poller():
                 last_board_row_ids = board_ids
             except Exception as e:
                 print(f"[NOTION][BOARD] Error: {e}")
-
+        # 4) SCHEDULE: 신규 페이지 감지 → ALARM 채널로 '태그, 날짜' 포함 메시지
+        if NOTION_DATABASE_SCHEDULE_ID and REPORT_CHANNEL_ID_ALARM:
+            try:
+                # 진단: DB 메타 조회
+                try:
+                    info = await notion.databases.retrieve(NOTION_DATABASE_SCHEDULE_ID)
+                    title_txt = "".join([t.get("plain_text", "") for t in info.get("title", [])])
+                    prop_keys = list((info.get("properties") or {}).keys())
+                    print(f"[SCHEDULE][retrieve] title='{title_txt}' props={prop_keys}")
+                except Exception as e:
+                    print(f"[SCHEDULE][retrieve][Error] {e}")
+                sched_res = await notion.databases.query(
+                    database_id=NOTION_DATABASE_SCHEDULE_ID,
+                    page_size=20,
+                    sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+                )
+                try:
+                    print(f"[SCHEDULE][query] results={len(sched_res.get('results', []))}")
+                except Exception:
+                    pass
+                sched_rows = sched_res.get("results", [])
+                sched_ids = set(row["id"] for row in sched_rows)
+                sched_new = sched_ids - last_schedule_row_ids
+                if sched_new:
+                    lines = ["새 일정이 등록되었습니다 📅"]
+                    for row in sched_rows:
+                        if row["id"] not in sched_new:
+                            continue
+                        props = row.get("properties", {})
+                        # 날짜: '날짜' 우선, 없으면 첫 date 타입
+                        date_str = ""
+                        date_prop = props.get("날짜") or {}
+                        if not date_prop:
+                            for k, v in props.items():
+                                if isinstance(v, dict) and v.get("type") == "date":
+                                    date_prop = v
+                                    break
+                        if isinstance(date_prop, dict) and date_prop.get("type") == "date":
+                            d = date_prop.get("date") or {}
+                            start = _trim_to_minute(d.get("start") or "")
+                            end = _trim_to_minute(d.get("end") or "")
+                            date_str = start if not end else f"{start} ~ {end}"
+                        # 태그: '태그' 우선, 없으면 첫 multi_select
+                        tags: list[str] = []
+                        tag_prop = props.get("태그") or {}
+                        if not tag_prop:
+                            for k, v in props.items():
+                                if isinstance(v, dict) and v.get("type") == "multi_select":
+                                    tag_prop = v
+                                    break
+                        if isinstance(tag_prop, dict) and tag_prop.get("type") == "multi_select":
+                            for opt in tag_prop.get("multi_select", []) or []:
+                                name = (opt.get("name") or "").strip()
+                                if name:
+                                    tags.append(name)
+                        tag_str = ", ".join(tags) if tags else "(태그 없음)"
+                        if date_str:
+                            lines.append(f"- {tag_str} — {date_str}")
+                        else:
+                            lines.append(f"- {tag_str}")
+                    channel = bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
+                    try:
+                        print("[NOTION][SCHEDULE] sending to ALARM:\n" + "\n".join(lines))
+                    except Exception:
+                        pass
+                    await channel.send("\n".join(lines))
+                else:
+                    try:
+                        print("[NOTION][SCHEDULE] no new pages detected")
+                    except Exception:
+                        pass
+                last_schedule_row_ids = sched_ids
+            except Exception as e:
+                print(f"[NOTION][SCHEDULE] Error: {e}")
+        else:
+            try:
+                if not NOTION_DATABASE_SCHEDULE_ID:
+                    print("[NOTION][SCHEDULE] skipped: NOTION_DATABASE_SCHEDULE_ID not set")
+                if not REPORT_CHANNEL_ID_ALARM:
+                    print("[NOTION][SCHEDULE] skipped: REPORT_CHANNEL_ID_ALARM not set")
+            except Exception:
+                pass
+        # 마지막에 ID 집합 동기화
+        last_notion_row_ids = new_row_ids
+    except Exception as e:
+        print(f"[NOTION] Error: {e}")
 
 # =========================
 # 명령어: 누적 시간 조회
