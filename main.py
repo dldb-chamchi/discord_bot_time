@@ -162,8 +162,10 @@ async def on_ready():
 
     daily_reporter.start()
     ##### 추가된 부분 시작 #####
+    '''
     if not scheduled_message.is_running():
         scheduled_message.start() # 새로 추가한 정기 메시지 태스크를 시작합니다.
+    '''
     if not notion_update_poller.is_running():
         notion_update_poller.start() # 노션 업데이트 폴링 태스크를 시작합니다.
     ##### 추가된 부분 끝 #####
@@ -384,6 +386,7 @@ async def daily_reporter():
 # =========================
 # 정기 메시지 (월 수 토 22:00 KST = 13:00 UTC)
 # =========================
+'''
 @tasks.loop(time=dt.time(hour=13, minute=0, tzinfo=dt.timezone.utc))
 async def scheduled_message():
     now = now_kst()
@@ -392,6 +395,7 @@ async def scheduled_message():
         channel = bot.get_channel(REPORT_CHANNEL_ID_TOEIC) or await bot.fetch_channel(REPORT_CHANNEL_ID_TOEIC)
         message = "🔥 토익 인증~ 12시 전까지 노션에다가 인증 올리기!🔥"
         await channel.send(message)
+'''
 ##### 추가된 부분 끝 #####
 
 # =========================
