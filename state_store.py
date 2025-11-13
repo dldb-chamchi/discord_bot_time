@@ -1,18 +1,10 @@
+# state_store.py
 import os
 import json
 import datetime as dt
 from typing import Dict, Any
 
-KST = dt.timezone(dt.timedelta(hours=9))
-
-def now_kst() -> dt.datetime:
-    return dt.datetime.now(tz=KST)
-
-def iso(dtobj: dt.datetime) -> str:
-    return dtobj.astimezone(KST).isoformat()
-
-def parse_iso(s: str) -> dt.datetime:
-    return dt.datetime.fromisoformat(s)
+from time_utils import now_kst, parse_iso, iso
 
 class StateStore:
     def __init__(self, data_file: str):
