@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  my-bot:
+    build: .
+    container_name: discord-time-bot
+    restart: always  # 서버 재부팅 되거나 봇이 죽으면 자동으로 다시 살림
+    env_file:
+      - .env        # 같은 폴더에 있는 .env 파일을 자동으로 읽음
+    volumes:
+      - ./data:/app/data  # [중요] 컨테이너가 삭제돼도 로컬의 data 폴더는 지키기
