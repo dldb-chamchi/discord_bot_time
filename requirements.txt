@@ -1,3 +1,13 @@
-python-dotenv
+# 1. 디스코드 봇 필수
 discord.py
+python-dotenv
+
+# 2. 노션(Notion) 연동 필수
 notion-client
+requests
+
+# 3. 시간(Time) 관리 필수 (한국 시간 KST 처리용)
+pytz
+
+# 4. 데이터 처리 및 기타 (혹시 모를 의존성)
+aiohttp
