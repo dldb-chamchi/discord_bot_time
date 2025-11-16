@@ -21,9 +21,11 @@ jobs:
             # 1. 에러 발생 시 즉시 중단
             set -e
 
+            cd
+
             # 2. 프로젝트 폴더로 이동 (★ 여기가 제일 중요함!)
             # (아까 git clone으로 만든 폴더 이름과 똑같아야 합니다)
-            cd ~/discord-study-bot
+            cd discord-bot-time/
 
             # 3. 혹시 실행 권한이 풀렸을 수 있으니 다시 부여
             chmod +x redeploy.sh
