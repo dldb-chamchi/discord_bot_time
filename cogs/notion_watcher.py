@@ -74,12 +74,15 @@ class NotionWatcherCog(commands.Cog):
         try:
             notion = NotionClient(auth=NOTION_TOKEN)
 
+            # [DEBUG] URL 확인을 위한 코드 추가
+            debug_path = f"databases/{NOTION_DATABASE_FEATURE_ID}/query"
+            print(f"[DEBUG] Requesting Path: '{debug_path}'")
+
             # ---------------------------------------------------------
-            # 1. FEATURE DB 조회  (예전: notion.databases.query)
-            #    => 이제: REST 엔드포인트 직접 호출
+            # 1. FEATURE DB 조회
             # ---------------------------------------------------------
             feature_res = await notion.request(
-                path=f"databases/{NOTION_DATABASE_FEATURE_ID}/query",
+                path=debug_path,
                 method="post",
                 body={
                     "page_size": 50,
@@ -99,7 +102,7 @@ class NotionWatcherCog(commands.Cog):
 
                 # 최신 데이터 다시 조회
                 feature_res = await notion.request(
-                    path=f"databases/{NOTION_DATABASE_FEATURE_ID}/query",
+                    path=debug_path,
                     method="post",
                     body={
                         "page_size": 50,
