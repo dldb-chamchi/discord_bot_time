@@ -1,31 +1,32 @@
-#디스코드 봇 자동 배포 워크플로우
-#자동 배포 워크플로우 --- IGNORE ---
 name: Deploy Bot
 
 on:
-  # main 브랜치에 push가 발생했을 때 이 워크플로우를 실행합니다.
   push:
-    branches: [ "main" ]
+    branches: ['main']
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. GitHub Actions를 실행하는 가상 머신에 코드를 다운로드합니다.
-      - uses: actions/checkout@v4
-
-      # 2. 서버에 SSH로 접속하여 배포 스크립트를 실행합니다.
       - name: Deploy to Server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
+          # 포트 번호가 기본(22)이 아니라면 아래 주석 풀고 설정하세요
+          # port: ${{ secrets.DEPLOY_PORT }}
           script: |
-            # 스크립트 실행 중 오류가 발생하면 즉시 중단합니다.
+            # 1. 에러 발생 시 즉시 중단
             set -e
 
-            # 서버의 프로젝트 디렉터리에 있는 redeploy.sh 스크립트를 실행합니다.
-            # 경로를 discord-study-bot으로 수정했습니다.
-            ~/discord-study-bot/redeploy.sh
+            # 2. 프로젝트 폴더로 이동 (★ 여기가 제일 중요함!)
+            # (아까 git clone으로 만든 폴더 이름과 똑같아야 합니다)
+            cd ~/discord-study-bot
+
+            # 3. 혹시 실행 권한이 풀렸을 수 있으니 다시 부여
+            chmod +x redeploy.sh
+
+            # 4. 배포 스크립트 실행
+            ./redeploy.sh
