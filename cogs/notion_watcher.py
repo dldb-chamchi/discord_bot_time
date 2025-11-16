@@ -37,9 +37,10 @@ def _trim_to_minute(iso_str: str) -> str:
     return iso_str
 
 def _clean_id(env_id: Optional[str]) -> str:
-    """환경변수에서 가져온 ID의 공백/줄바꿈을 제거"""
+    """환경변수에서 가져온 ID의 앞뒤 공백 및 줄바꿈 문자 강제 제거"""
     if not env_id:
         return ""
+    # 문자열로 변환 후 양쪽 공백/줄바꿈 삭제
     return str(env_id).strip()
 
 
@@ -54,12 +55,12 @@ class NotionWatcherCog(commands.Cog):
         self.last_schedule_row_ids: Set[str] = set()
 
     async def cog_load(self) -> None:
-        """Cog가 로드될 때 호출됨 (discord.py 2.x)"""
+        """Cog가 로드될 때 호출됨"""
         if NOTION_TOKEN and NOTION_DATABASE_FEATURE_ID:
             self.notion_update_poller.start()
             print("[NOTION] notion_update_poller started")
         else:
-            print("[NOTION] NOTION_TOKEN 또는 NOTION_DATABASE_FEATURE_ID가 설정되지 않아 폴링을 시작하지 않습니다.")
+            print("[NOTION] 설정 부족으로 폴링을 시작하지 않습니다.")
 
     def cog_unload(self) -> None:
         """Cog가 언로드될 때 호출"""
@@ -73,23 +74,31 @@ class NotionWatcherCog(commands.Cog):
     @tasks.loop(seconds=60)
     async def notion_update_poller(self):
         if not NOTION_TOKEN or not NOTION_DATABASE_FEATURE_ID:
-            return  # 설정이 없으면 아무 것도 안 함
+            return
 
-        print("[NOTION] poller tick")  # 디버그용
+        print("[NOTION] poller tick")
 
         try:
-            notion = NotionClient(auth=NOTION_TOKEN.strip())
+            # [안전 장치] 토큰에도 혹시 모를 공백 제거
+            notion = NotionClient(auth=str(NOTION_TOKEN).strip())
 
-            # [중요] ID 공백 제거 (안전 장치)
-            feature_db_id = _clean_id(NOTION_DATABASE_FEATURE_ID)
+            # [핵심 수정] ID 세탁 후 수동 request 사용 (메서드 에러 방지 + URL 에러 방지)
+            clean_id = _clean_id(NOTION_DATABASE_FEATURE_ID)
+            request_path = f"databases/{clean_id}/query"
+
+            # 디버깅용 로그 (문제 발생 시 확인용)
+            print(f"[DEBUG] Requesting: {request_path}")
 
             # ---------------------------------------------------------
-            # 1. FEATURE DB 조회 (공식 함수 사용)
+            # 1. FEATURE DB 조회 (request 메서드 사용)
             # ---------------------------------------------------------
-            feature_res = await notion.databases.query(
-                database_id=feature_db_id,
-                page_size=50,
-                sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+            feature_res = await notion.request(
+                path=request_path,
+                method="post",
+                body={
+                    "page_size": 50,
+                    "sorts": [{"timestamp": "last_edited_time", "direction": "descending"}]
+                }
             )
             
             rows = feature_res.get("results", [])
@@ -98,18 +107,21 @@ class NotionWatcherCog(commands.Cog):
             # 신규 행 감지
             only_new = new_row_ids - self.last_notion_row_ids
             if only_new:
-                print(f"[NOTION][FEATURE] New rows detected ({len(only_new)}). Waiting 20s for user input...")
+                print(f"[NOTION][FEATURE] New rows detected ({len(only_new)}). Waiting 20s...")
                 await asyncio.sleep(20)
 
                 # 최신 데이터 다시 조회
-                feature_res = await notion.databases.query(
-                    database_id=feature_db_id,
-                    page_size=50,
-                    sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+                feature_res = await notion.request(
+                    path=request_path,
+                    method="post",
+                    body={
+                        "page_size": 50,
+                        "sorts": [{"timestamp": "last_edited_time", "direction": "descending"}]
+                    }
                 )
                 rows = feature_res.get("results", [])
 
-            # 1-1) FEATURE: 신규 행 처리 (완료/요청 분기)
+            # 1-1) FEATURE: 신규 행 처리
             if only_new:
                 new_request_lines: List[str] = []
                 new_completed_lines: List[str] = []
@@ -124,6 +136,7 @@ class NotionWatcherCog(commands.Cog):
                     # --- 상태 이름 추출 ---
                     status_names: List[str] = []
                     status_prop = props.get("상태") or {}
+                    # (타입 찾기 로직 생략 없이 전체 포함)
                     if not status_prop:
                         for _, v in props.items():
                             if isinstance(v, dict) and v.get("type") in ("status", "select", "multi_select"):
@@ -135,19 +148,16 @@ class NotionWatcherCog(commands.Cog):
                         if ptype == "status":
                             st = status_prop.get("status") or {}
                             val = (st.get("name") or "").strip()
-                            if val:
-                                status_names.append(val)
+                            if val: status_names.append(val)
                         elif ptype == "select":
                             st = status_prop.get("select") or {}
                             val = (st.get("name") or "").strip()
-                            if val:
-                                status_names.append(val)
+                            if val: status_names.append(val)
                         elif ptype == "multi_select":
                             arr = status_prop.get("multi_select", []) or []
                             for opt in arr:
                                 val = (opt.get("name") or "").strip()
-                                if val:
-                                    status_names.append(val)
+                                if val: status_names.append(val)
 
                     # --- 내용 추출 ---
                     content_text = ""
@@ -160,8 +170,7 @@ class NotionWatcherCog(commands.Cog):
                         elif ctype == "title":
                             arr = content_prop.get("title", [])
                             content_text = "".join([t.get("plain_text", "") for t in arr]).strip()
-                    if not content_text:
-                        content_text = "(내용 없음)"
+                    if not content_text: content_text = "(내용 없음)"
 
                     # --- 설명 추출 ---
                     desc_text = ""
@@ -169,24 +178,19 @@ class NotionWatcherCog(commands.Cog):
                     if isinstance(desc_prop, dict) and desc_prop.get("type") == "rich_text":
                         arr = desc_prop.get("rich_text", [])
                         desc_text = "".join([t.get("plain_text", "") for t in arr]).strip()
-                    if not desc_text:
-                        desc_text = "(설명 없음)"
+                    if not desc_text: desc_text = "(설명 없음)"
 
                     line = f"- {content_text} — {desc_text}"
 
-                    # 완료 여부에 따라 분류
                     if _any_completed(status_names):
                         new_completed_lines.append(line)
                     else:
                         new_request_lines.append(line)
 
-                    # 상태 저장
                     if status_names:
                         self.last_feature_status_by_id[rid] = ",".join(status_names)
 
-                channel = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(
-                    REPORT_CHANNEL_ID_FEATURE
-                )
+                channel = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
                 if new_request_lines:
                     header = "기능 요청이 들어왔습니다 ✨"
                     await channel.send("\n".join([header] + new_request_lines))
@@ -200,7 +204,7 @@ class NotionWatcherCog(commands.Cog):
                 rid = row["id"]
                 props = row.get("properties", {})
 
-                # 상태 추출
+                # 상태 추출 (중복 로직 최소화)
                 status_names: List[str] = []
                 status_prop = props.get("상태") or {}
                 if not status_prop:
@@ -213,28 +217,23 @@ class NotionWatcherCog(commands.Cog):
                     if ptype == "status":
                         st = status_prop.get("status") or {}
                         val = (st.get("name") or "").strip()
-                        if val:
-                            status_names.append(val)
+                        if val: status_names.append(val)
                     elif ptype == "select":
                         st = status_prop.get("select") or {}
                         val = (st.get("name") or "").strip()
-                        if val:
-                            status_names.append(val)
+                        if val: status_names.append(val)
                     elif ptype == "multi_select":
                         arr = status_prop.get("multi_select", []) or []
                         for opt in arr:
                             val = (opt.get("name") or "").strip()
-                            if val:
-                                status_names.append(val)
+                            if val: status_names.append(val)
 
                 prev = self.last_feature_status_by_id.get(rid)
-                prev_completed = _any_completed(
-                    [p.strip() for p in (prev.split(",") if prev else [])]
-                )
+                prev_completed = _any_completed([p.strip() for p in (prev.split(",") if prev else [])])
                 curr_completed = _any_completed(status_names)
 
                 if curr_completed and not prev_completed:
-                    # 내용 추출
+                    # 내용/설명 추출
                     content_text = ""
                     content_prop = props.get("내용") or {}
                     if isinstance(content_prop, dict):
@@ -245,17 +244,14 @@ class NotionWatcherCog(commands.Cog):
                         elif ctype == "title":
                             arr = content_prop.get("title", [])
                             content_text = "".join([t.get("plain_text", "") for t in arr]).strip()
-                    if not content_text:
-                        content_text = "(내용 없음)"
+                    if not content_text: content_text = "(내용 없음)"
 
-                    # 설명 추출
                     desc_text = ""
                     desc_prop = props.get("설명") or props.get("Description") or {}
                     if isinstance(desc_prop, dict) and desc_prop.get("type") == "rich_text":
                         arr = desc_prop.get("rich_text", [])
                         desc_text = "".join([t.get("plain_text", "") for t in arr]).strip()
-                    if not desc_text:
-                        desc_text = "(설명 없음)"
+                    if not desc_text: desc_text = "(설명 없음)"
 
                     status_change_lines.append(f"- {content_text} — {desc_text}")
 
@@ -264,30 +260,29 @@ class NotionWatcherCog(commands.Cog):
 
             if status_change_lines:
                 header = "기능이 추가됐습니다 ✅"
-                channel = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(
-                    REPORT_CHANNEL_ID_FEATURE
-                )
+                channel = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
                 await channel.send("\n".join([header] + status_change_lines))
 
             # ---------------------------------------------------------
-            # 3. BOARD DB: 신규 글 감지
+            # 3. BOARD DB
             # ---------------------------------------------------------
             if NOTION_DATABASE_BOARD_ID and REPORT_CHANNEL_ID_ALARM:
                 try:
                     board_db_id = _clean_id(NOTION_DATABASE_BOARD_ID)
-                    board_res = await notion.databases.query(
-                        database_id=board_db_id,
-                        page_size=20,
-                        sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+                    board_res = await notion.request(
+                        path=f"databases/{board_db_id}/query",
+                        method="post",
+                        body={
+                            "page_size": 20,
+                            "sorts": [{"timestamp": "last_edited_time", "direction": "descending"}]
+                        }
                     )
                     board_rows = board_res.get("results", [])
                     board_ids = {row["id"] for row in board_rows}
                     board_new = board_ids - self.last_board_row_ids
 
                     if board_new:
-                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(
-                            REPORT_CHANNEL_ID_ALARM
-                        )
+                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
                         msg = "게시판에 새로운 글이 올라왔습니다."
                         await channel.send(msg)
 
@@ -296,15 +291,20 @@ class NotionWatcherCog(commands.Cog):
                     print(f"[NOTION][BOARD] Error: {e}")
 
             # ---------------------------------------------------------
-            # 4. SCHEDULE DB: 신규 일정 감지
+            # 4. SCHEDULE DB
             # ---------------------------------------------------------
             if NOTION_DATABASE_SCHEDULE_ID and REPORT_CHANNEL_ID_ALARM:
                 try:
                     sched_db_id = _clean_id(NOTION_DATABASE_SCHEDULE_ID)
-                    sched_res = await notion.databases.query(
-                        database_id=sched_db_id,
-                        page_size=20,
-                        sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+                    sched_path = f"databases/{sched_db_id}/query"
+                    
+                    sched_res = await notion.request(
+                        path=sched_path,
+                        method="post",
+                        body={
+                            "page_size": 20,
+                            "sorts": [{"timestamp": "last_edited_time", "direction": "descending"}]
+                        }
                     )
                     sched_rows = sched_res.get("results", [])
                     sched_ids = {row["id"] for row in sched_rows}
@@ -314,11 +314,13 @@ class NotionWatcherCog(commands.Cog):
                         print(f"[NOTION][SCHEDULE] New items detected ({len(sched_new)}). Waiting 20s...")
                         await asyncio.sleep(20)
 
-                        # 다시 조회
-                        sched_res = await notion.databases.query(
-                            database_id=sched_db_id,
-                            page_size=20,
-                            sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
+                        sched_res = await notion.request(
+                            path=sched_path,
+                            method="post",
+                            body={
+                                "page_size": 20,
+                                "sorts": [{"timestamp": "last_edited_time", "direction": "descending"}]
+                            }
                         )
                         sched_rows = sched_res.get("results", [])
 
@@ -329,7 +331,6 @@ class NotionWatcherCog(commands.Cog):
                                 continue
 
                             props = row.get("properties", {})
-
                             # 날짜 추출
                             date_str = ""
                             date_prop = props.get("날짜") or {}
@@ -355,8 +356,7 @@ class NotionWatcherCog(commands.Cog):
                             if isinstance(tag_prop, dict) and tag_prop.get("type") == "multi_select":
                                 for opt in tag_prop.get("multi_select", []) or []:
                                     name = (opt.get("name") or "").strip()
-                                    if name:
-                                        tags.append(name)
+                                    if name: tags.append(name)
 
                             tag_str = ", ".join(tags) if tags else "(태그 없음)"
                             if date_str:
@@ -364,16 +364,13 @@ class NotionWatcherCog(commands.Cog):
                             else:
                                 lines.append(f"- {tag_str}")
 
-                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(
-                            REPORT_CHANNEL_ID_ALARM
-                        )
+                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
                         await channel.send("\n".join(lines))
 
                     self.last_schedule_row_ids = sched_ids
                 except Exception as e:
                     print(f"[NOTION][SCHEDULE] Error: {e}")
 
-            # 마지막에 FEATURE DB의 ID 집합 동기화
             self.last_notion_row_ids = new_row_ids
 
         except Exception as e:
