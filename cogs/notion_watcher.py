@@ -1,7 +1,7 @@
 # cogs/notion_watcher.py
 
 import asyncio
-from typing import Dict, Set, List
+from typing import Dict, Set, List, Optional
 
 from discord.ext import commands, tasks
 from notion_client import AsyncClient as NotionClient
@@ -35,6 +35,12 @@ def _trim_to_minute(iso_str: str) -> str:
         hhmm = time_part[:5]
         return f"{date_part} {hhmm}"
     return iso_str
+
+def _clean_id(env_id: Optional[str]) -> str:
+    """환경변수에서 가져온 ID의 공백/줄바꿈을 제거"""
+    if not env_id:
+        return ""
+    return str(env_id).strip()
 
 
 class NotionWatcherCog(commands.Cog):
@@ -72,25 +78,20 @@ class NotionWatcherCog(commands.Cog):
         print("[NOTION] poller tick")  # 디버그용
 
         try:
-            notion = NotionClient(auth=NOTION_TOKEN)
+            notion = NotionClient(auth=NOTION_TOKEN.strip())
 
-            # [DEBUG] URL 확인을 위한 코드 추가
-            debug_path = f"databases/{NOTION_DATABASE_FEATURE_ID}/query"
-            print(f"[DEBUG] Requesting Path: '{debug_path}'")
+            # [중요] ID 공백 제거 (안전 장치)
+            feature_db_id = _clean_id(NOTION_DATABASE_FEATURE_ID)
 
             # ---------------------------------------------------------
-            # 1. FEATURE DB 조회
+            # 1. FEATURE DB 조회 (공식 함수 사용)
             # ---------------------------------------------------------
-            feature_res = await notion.request(
-                path=debug_path,
-                method="post",
-                body={
-                    "page_size": 50,
-                    "sorts": [
-                        {"timestamp": "last_edited_time", "direction": "descending"}
-                    ],
-                },
+            feature_res = await notion.databases.query(
+                database_id=feature_db_id,
+                page_size=50,
+                sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
             )
+            
             rows = feature_res.get("results", [])
             new_row_ids = {row["id"] for row in rows}
 
@@ -101,15 +102,10 @@ class NotionWatcherCog(commands.Cog):
                 await asyncio.sleep(20)
 
                 # 최신 데이터 다시 조회
-                feature_res = await notion.request(
-                    path=debug_path,
-                    method="post",
-                    body={
-                        "page_size": 50,
-                        "sorts": [
-                            {"timestamp": "last_edited_time", "direction": "descending"}
-                        ],
-                    },
+                feature_res = await notion.databases.query(
+                    database_id=feature_db_id,
+                    page_size=50,
+                    sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
                 )
                 rows = feature_res.get("results", [])
 
@@ -274,19 +270,15 @@ class NotionWatcherCog(commands.Cog):
                 await channel.send("\n".join([header] + status_change_lines))
 
             # ---------------------------------------------------------
-            # 3. BOARD DB: 신규 글 감지  (REST로 변경)
+            # 3. BOARD DB: 신규 글 감지
             # ---------------------------------------------------------
             if NOTION_DATABASE_BOARD_ID and REPORT_CHANNEL_ID_ALARM:
                 try:
-                    board_res = await notion.request(
-                        path=f"databases/{NOTION_DATABASE_BOARD_ID}/query",
-                        method="post",
-                        body={
-                            "page_size": 20,
-                            "sorts": [
-                                {"timestamp": "last_edited_time", "direction": "descending"}
-                            ],
-                        },
+                    board_db_id = _clean_id(NOTION_DATABASE_BOARD_ID)
+                    board_res = await notion.databases.query(
+                        database_id=board_db_id,
+                        page_size=20,
+                        sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
                     )
                     board_rows = board_res.get("results", [])
                     board_ids = {row["id"] for row in board_rows}
@@ -304,19 +296,15 @@ class NotionWatcherCog(commands.Cog):
                     print(f"[NOTION][BOARD] Error: {e}")
 
             # ---------------------------------------------------------
-            # 4. SCHEDULE DB: 신규 일정 감지  (REST로 변경)
+            # 4. SCHEDULE DB: 신규 일정 감지
             # ---------------------------------------------------------
             if NOTION_DATABASE_SCHEDULE_ID and REPORT_CHANNEL_ID_ALARM:
                 try:
-                    sched_res = await notion.request(
-                        path=f"databases/{NOTION_DATABASE_SCHEDULE_ID}/query",
-                        method="post",
-                        body={
-                            "page_size": 20,
-                            "sorts": [
-                                {"timestamp": "last_edited_time", "direction": "descending"}
-                            ],
-                        },
+                    sched_db_id = _clean_id(NOTION_DATABASE_SCHEDULE_ID)
+                    sched_res = await notion.databases.query(
+                        database_id=sched_db_id,
+                        page_size=20,
+                        sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
                     )
                     sched_rows = sched_res.get("results", [])
                     sched_ids = {row["id"] for row in sched_rows}
@@ -327,15 +315,10 @@ class NotionWatcherCog(commands.Cog):
                         await asyncio.sleep(20)
 
                         # 다시 조회
-                        sched_res = await notion.request(
-                            path=f"databases/{NOTION_DATABASE_SCHEDULE_ID}/query",
-                            method="post",
-                            body={
-                                "page_size": 20,
-                                "sorts": [
-                                    {"timestamp": "last_edited_time", "direction": "descending"}
-                                ],
-                            },
+                        sched_res = await notion.databases.query(
+                            database_id=sched_db_id,
+                            page_size=20,
+                            sorts=[{"timestamp": "last_edited_time", "direction": "descending"}]
                         )
                         sched_rows = sched_res.get("results", [])
 
