@@ -1,7 +1,9 @@
 # cogs/notion_watcher.py
 
 import asyncio
-import aiohttp  # 라이브러리 직접 요청용
+import aiohttp
+import json
+import os
 from typing import Dict, Set, List, Optional, Any
 
 from discord.ext import commands, tasks
@@ -36,30 +38,64 @@ def _trim_to_minute(iso_str: str) -> str:
     return iso_str
 
 def _clean_env(val: Optional[str]) -> str:
-    """환경변수 공백 제거"""
     return str(val).strip() if val else ""
 
 class NotionWatcherCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # [핵심] 파일 위치를 data 폴더 내부로 지정 (재배포 시 삭제 방지)
+        self.db_file = "data/notion_db.json"
+        
         self.last_notion_row_ids: Set[str] = set()
         self.last_feature_status_by_id: Dict[str, str] = {}
         self.last_board_row_ids: Set[str] = set()
         self.last_schedule_row_ids: Set[str] = set()
 
+        self.load_state()
+
+    def load_state(self):
+        """파일에서 상태 복구"""
+        if not os.path.exists(self.db_file):
+            print(f"[NOTION] {self.db_file} 파일이 없어 새로 시작합니다.")
+            return
+
+        try:
+            with open(self.db_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.last_notion_row_ids = set(data.get("features", []))
+                self.last_feature_status_by_id = data.get("feature_statuses", {})
+                self.last_board_row_ids = set(data.get("boards", []))
+                self.last_schedule_row_ids = set(data.get("schedules", []))
+            print(f"[NOTION] {self.db_file} 로드 완료.")
+        except Exception as e:
+            print(f"[NOTION] 로드 중 오류: {e}")
+
+    def save_state(self):
+        """파일에 상태 저장"""
+        data = {
+            "features": list(self.last_notion_row_ids),
+            "feature_statuses": self.last_feature_status_by_id,
+            "boards": list(self.last_board_row_ids),
+            "schedules": list(self.last_schedule_row_ids)
+        }
+        try:
+            # data 폴더가 없을 경우를 대비해 폴더 생성
+            os.makedirs(os.path.dirname(self.db_file), exist_ok=True)
+            with open(self.db_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[NOTION] 저장 중 오류: {e}")
+
     async def cog_load(self) -> None:
         if NOTION_TOKEN and NOTION_DATABASE_FEATURE_ID:
             self.notion_update_poller.start()
-            print("[NOTION] notion_update_poller started")
         else:
-            print("[NOTION] 설정 부족으로 폴링을 시작하지 않습니다.")
+            print("[NOTION] 설정 부족으로 폴링 안 함")
 
     def cog_unload(self) -> None:
         if self.notion_update_poller.is_running():
             self.notion_update_poller.cancel()
-            print("[NOTION] notion_update_poller stopped")
 
-    # [핵심] 라이브러리 대신 직접 요청을 보내는 헬퍼 함수
     async def _fetch_notion_db(self, session: aiohttp.ClientSession, db_id: str) -> List[Dict[str, Any]]:
         clean_db_id = _clean_env(db_id)
         if not clean_db_id:
@@ -79,18 +115,12 @@ class NotionWatcherCog(commands.Cog):
         try:
             async with session.post(url, headers=headers, json=payload) as resp:
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    print(f"[NOTION] Error {resp.status} requesting {clean_db_id}: {error_text}")
                     return []
                 data = await resp.json()
                 return data.get("results", [])
-        except Exception as e:
-            print(f"[NOTION] Request Exception: {e}")
+        except Exception:
             return []
 
-    # =========================
-    # 노션 업데이트 폴링
-    # =========================
     @tasks.loop(seconds=60)
     async def notion_update_poller(self):
         if not NOTION_TOKEN:
@@ -100,208 +130,187 @@ class NotionWatcherCog(commands.Cog):
 
         try:
             async with aiohttp.ClientSession() as session:
-                # ---------------------------------------------------------
-                # 1. FEATURE DB 조회
-                # ---------------------------------------------------------
+                # 1. Feature DB
                 if NOTION_DATABASE_FEATURE_ID:
                     rows = await self._fetch_notion_db(session, NOTION_DATABASE_FEATURE_ID)
                     new_row_ids = {row["id"] for row in rows}
-
-                    # 신규 행 감지
                     only_new = new_row_ids - self.last_notion_row_ids
+                    
                     if only_new:
-                        print(f"[NOTION] New rows detected ({len(only_new)}). Waiting 20s...")
+                        print(f"[NOTION] New rows detected. Waiting 20s...")
                         await asyncio.sleep(20)
-                        # 다시 조회
                         rows = await self._fetch_notion_db(session, NOTION_DATABASE_FEATURE_ID)
+                        # ID 재계산 안 함 (ID는 불변)
 
-                    # 1-1) 신규 행 처리
+                    # 신규 알림
                     if only_new:
-                        new_request_lines = []
-                        new_completed_lines = []
-
+                        new_req = []
+                        new_comp = []
                         for row in rows:
-                            if row["id"] not in only_new:
-                                continue
+                            if row["id"] not in only_new: continue
                             
                             rid = row["id"]
                             props = row.get("properties", {})
                             
-                            # 상태 추출
+                            # 상태
                             status_names = []
-                            status_prop = props.get("상태")
-                            # (간소화된 로직)
-                            if not status_prop:
+                            st = props.get("상태")
+                            if not st:
                                 for v in props.values():
                                     if isinstance(v, dict) and v.get("type") in ("status", "select", "multi_select"):
-                                        status_prop = v
-                                        break
+                                        st = v; break
+                            if st:
+                                t = st.get("type")
+                                if t == "status":
+                                    n = st.get("status", {}).get("name")
+                                    if n: status_names.append(n)
+                                elif t == "select":
+                                    n = st.get("select", {}).get("name")
+                                    if n: status_names.append(n)
+                                elif t == "multi_select":
+                                    for o in st.get("multi_select", []):
+                                        if o.get("name"): status_names.append(o.get("name"))
+
+                            # 내용/설명
+                            c_txt = "(내용 없음)"
+                            cp = props.get("내용")
+                            if cp and cp.get("type") == "title":
+                                c_txt = "".join([x.get("plain_text","") for x in cp.get("title",[])]).strip() or "(내용 없음)"
+                            elif cp and cp.get("type") == "rich_text":
+                                c_txt = "".join([x.get("plain_text","") for x in cp.get("rich_text",[])]).strip() or "(내용 없음)"
                             
-                            if status_prop:
-                                ptype = status_prop.get("type")
-                                if ptype == "status":
-                                    name = status_prop.get("status", {}).get("name")
-                                    if name: status_names.append(name)
-                                elif ptype == "select":
-                                    name = status_prop.get("select", {}).get("name")
-                                    if name: status_names.append(name)
-                                elif ptype == "multi_select":
-                                    for opt in status_prop.get("multi_select", []):
-                                        if opt.get("name"): status_names.append(opt.get("name"))
+                            d_txt = "(설명 없음)"
+                            dp = props.get("설명") or props.get("Description")
+                            if dp and dp.get("type") == "rich_text":
+                                d_txt = "".join([x.get("plain_text","") for x in dp.get("rich_text",[])]).strip() or "(설명 없음)"
 
-                            # 내용 추출
-                            content_text = "(내용 없음)"
-                            c_prop = props.get("내용")
-                            if c_prop and c_prop.get("type") == "title":
-                                arr = c_prop.get("title", [])
-                                content_text = "".join([t.get("plain_text", "") for t in arr]).strip() or "(내용 없음)"
-                            elif c_prop and c_prop.get("type") == "rich_text":
-                                arr = c_prop.get("rich_text", [])
-                                content_text = "".join([t.get("plain_text", "") for t in arr]).strip() or "(내용 없음)"
+                            line = f"- {c_txt} — {d_txt}"
+                            if _any_completed(status_names): new_comp.append(line)
+                            else: new_req.append(line)
 
-                            # 설명 추출
-                            desc_text = "(설명 없음)"
-                            d_prop = props.get("설명") or props.get("Description")
-                            if d_prop and d_prop.get("type") == "rich_text":
-                                arr = d_prop.get("rich_text", [])
-                                desc_text = "".join([t.get("plain_text", "") for t in arr]).strip() or "(설명 없음)"
+                            if status_names: self.last_feature_status_by_id[rid] = ",".join(status_names)
 
-                            line = f"- {content_text} — {desc_text}"
+                        ch = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
+                        if new_req: await ch.send("\n".join(["기능 요청이 들어왔습니다 ✨"] + new_req))
+                        if new_comp: await ch.send("\n".join(["기능이 추가됐습니다 ✅"] + new_comp))
 
-                            if _any_completed(status_names):
-                                new_completed_lines.append(line)
-                            else:
-                                new_request_lines.append(line)
-                            
-                            if status_names:
-                                self.last_feature_status_by_id[rid] = ",".join(status_names)
-
-                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
-                        if new_request_lines:
-                            await channel.send("\n".join(["기능 요청이 들어왔습니다 ✨"] + new_request_lines))
-                        if new_completed_lines:
-                            await channel.send("\n".join(["기능이 추가됐습니다 ✅"] + new_completed_lines))
-
-                    # 1-2) 상태 변경 감지
-                    status_change_lines = []
+                    # 상태 변경 알림
+                    st_change = []
                     for row in rows:
                         rid = row["id"]
                         props = row.get("properties", {})
                         
                         status_names = []
-                        status_prop = props.get("상태")
-                        if not status_prop:
-                             for v in props.values():
+                        st = props.get("상태")
+                        if not st:
+                            for v in props.values():
                                 if isinstance(v, dict) and v.get("type") in ("status", "select", "multi_select"):
-                                    status_prop = v
-                                    break
-                        if status_prop:
-                            ptype = status_prop.get("type")
-                            if ptype == "status":
-                                name = status_prop.get("status", {}).get("name")
-                                if name: status_names.append(name)
-                            elif ptype == "select":
-                                name = status_prop.get("select", {}).get("name")
-                                if name: status_names.append(name)
-                            elif ptype == "multi_select":
-                                for opt in status_prop.get("multi_select", []):
-                                    if opt.get("name"): status_names.append(opt.get("name"))
+                                    st = v; break
+                        if st:
+                            t = st.get("type")
+                            if t == "status":
+                                n = st.get("status", {}).get("name")
+                                if n: status_names.append(n)
+                            elif t == "select":
+                                n = st.get("select", {}).get("name")
+                                if n: status_names.append(n)
+                            elif t == "multi_select":
+                                for o in st.get("multi_select", []):
+                                    if o.get("name"): status_names.append(o.get("name"))
 
                         prev = self.last_feature_status_by_id.get(rid)
-                        prev_comp = _any_completed([p.strip() for p in (prev.split(",") if prev else [])])
-                        curr_comp = _any_completed(status_names)
+                        if prev is None: # 최초 로딩 시 알림 방지
+                            if status_names: self.last_feature_status_by_id[rid] = ",".join(status_names)
+                            continue
 
-                        if curr_comp and not prev_comp:
-                             # 내용 추출 (중복 제거)
-                            content_text = "(내용 없음)"
-                            c_prop = props.get("내용")
-                            if c_prop and c_prop.get("type") == "title":
-                                arr = c_prop.get("title", [])
-                                content_text = "".join([t.get("plain_text", "") for t in arr]).strip() or "(내용 없음)"
-                            elif c_prop and c_prop.get("type") == "rich_text":
-                                arr = c_prop.get("rich_text", [])
-                                content_text = "".join([t.get("plain_text", "") for t in arr]).strip() or "(내용 없음)"
+                        prev_c = _any_completed([p.strip() for p in (prev.split(",") if prev else [])])
+                        curr_c = _any_completed(status_names)
 
-                            desc_text = "(설명 없음)"
-                            d_prop = props.get("설명") or props.get("Description")
-                            if d_prop and d_prop.get("type") == "rich_text":
-                                arr = d_prop.get("rich_text", [])
-                                desc_text = "".join([t.get("plain_text", "") for t in arr]).strip() or "(설명 없음)"
-
-                            status_change_lines.append(f"- {content_text} — {desc_text}")
-
-                        if status_names:
-                            self.last_feature_status_by_id[rid] = ",".join(status_names)
-
-                    if status_change_lines:
-                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
-                        await channel.send("\n".join(["기능이 추가됐습니다 ✅"] + status_change_lines))
-                    
-                    self.last_notion_row_ids = new_row_ids
-
-                # ---------------------------------------------------------
-                # 3. BOARD DB
-                # ---------------------------------------------------------
-                if NOTION_DATABASE_BOARD_ID and REPORT_CHANNEL_ID_ALARM:
-                    board_rows = await self._fetch_notion_db(session, NOTION_DATABASE_BOARD_ID)
-                    board_ids = {r["id"] for r in board_rows}
-                    board_new = board_ids - self.last_board_row_ids
-                    
-                    if board_new:
-                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
-                        await channel.send("게시판에 새로운 글이 올라왔습니다.")
-                    
-                    self.last_board_row_ids = board_ids
-
-                # ---------------------------------------------------------
-                # 4. SCHEDULE DB
-                # ---------------------------------------------------------
-                if NOTION_DATABASE_SCHEDULE_ID and REPORT_CHANNEL_ID_ALARM:
-                    sched_rows = await self._fetch_notion_db(session, NOTION_DATABASE_SCHEDULE_ID)
-                    sched_ids = {r["id"] for r in sched_rows}
-                    sched_new = sched_ids - self.last_schedule_row_ids
-                    
-                    if sched_new:
-                        print(f"[NOTION] New schedule items ({len(sched_new)}). Waiting 20s...")
-                        await asyncio.sleep(20)
-                        sched_rows = await self._fetch_notion_db(session, NOTION_DATABASE_SCHEDULE_ID)
-
-                        lines = ["새 일정이 등록되었습니다 📅"]
-                        for row in sched_rows:
-                             if row["id"] not in sched_new: continue
-                             props = row.get("properties", {})
-                             
-                             # 날짜
-                             date_str = ""
-                             d_prop = props.get("날짜")
-                             if not d_prop:
-                                 for v in props.values(): 
-                                     if isinstance(v, dict) and v.get("type") == "date": 
-                                         d_prop = v; break
-                             if d_prop and d_prop.get("type") == "date":
-                                 d = d_prop.get("date") or {}
-                                 s = _trim_to_minute(d.get("start"))
-                                 e = _trim_to_minute(d.get("end"))
-                                 date_str = s if not e else f"{s} ~ {e}"
+                        if curr_c and not prev_c:
+                             # 내용/설명 추출
+                            c_txt = "(내용 없음)"
+                            cp = props.get("내용")
+                            if cp and cp.get("type") == "title":
+                                c_txt = "".join([x.get("plain_text","") for x in cp.get("title",[])]).strip() or "(내용 없음)"
+                            elif cp and cp.get("type") == "rich_text":
+                                c_txt = "".join([x.get("plain_text","") for x in cp.get("rich_text",[])]).strip() or "(내용 없음)"
                             
-                             # 태그
-                             tags = []
-                             t_prop = props.get("태그")
-                             if not t_prop:
-                                 for v in props.values():
-                                     if isinstance(v, dict) and v.get("type") == "multi_select":
-                                         t_prop = v; break
-                             if t_prop and t_prop.get("type") == "multi_select":
-                                 for opt in t_prop.get("multi_select", []):
-                                     if opt.get("name"): tags.append(opt.get("name"))
-                             
-                             tag_str = ", ".join(tags) if tags else "(태그 없음)"
-                             lines.append(f"- {tag_str} — {date_str}" if date_str else f"- {tag_str}")
+                            d_txt = "(설명 없음)"
+                            dp = props.get("설명") or props.get("Description")
+                            if dp and dp.get("type") == "rich_text":
+                                d_txt = "".join([x.get("plain_text","") for x in dp.get("rich_text",[])]).strip() or "(설명 없음)"
+                            
+                            st_change.append(f"- {c_txt} — {d_txt}")
 
-                        channel = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
-                        await channel.send("\n".join(lines))
+                        if status_names: self.last_feature_status_by_id[rid] = ",".join(status_names)
 
-                    self.last_schedule_row_ids = sched_ids
+                    if st_change:
+                        ch = self.bot.get_channel(REPORT_CHANNEL_ID_FEATURE) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_FEATURE)
+                        await ch.send("\n".join(["기능이 추가됐습니다 ✅"] + st_change))
+                    
+                    if only_new or st_change or (new_row_ids != self.last_notion_row_ids):
+                        self.last_notion_row_ids = new_row_ids
+                        self.save_state()
+
+                # 3. Board DB
+                if NOTION_DATABASE_BOARD_ID and REPORT_CHANNEL_ID_ALARM:
+                    rows = await self._fetch_notion_db(session, NOTION_DATABASE_BOARD_ID)
+                    ids = {r["id"] for r in rows}
+                    new_ids = ids - self.last_board_row_ids
+                    if new_ids:
+                        ch = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
+                        await ch.send("게시판에 새로운 글이 올라왔습니다.")
+                        self.last_board_row_ids = ids
+                        self.save_state()
+
+                # 4. Schedule DB
+                if NOTION_DATABASE_SCHEDULE_ID and REPORT_CHANNEL_ID_ALARM:
+                    rows = await self._fetch_notion_db(session, NOTION_DATABASE_SCHEDULE_ID)
+                    ids = {r["id"] for r in rows}
+                    new_ids = ids - self.last_schedule_row_ids
+                    if new_ids:
+                        print(f"[NOTION] New schedule. Waiting 20s...")
+                        await asyncio.sleep(20)
+                        rows = await self._fetch_notion_db(session, NOTION_DATABASE_SCHEDULE_ID)
+                        ids = {r["id"] for r in rows} # 재계산
+                        new_ids = ids - self.last_schedule_row_ids
+                        
+                        if new_ids:
+                            lines = ["새 일정이 등록되었습니다 📅"]
+                            for row in rows:
+                                if row["id"] not in new_ids: continue
+                                props = row.get("properties", {})
+                                
+                                # 날짜
+                                d_str = ""
+                                dp = props.get("날짜")
+                                if not dp:
+                                    for v in props.values():
+                                        if isinstance(v, dict) and v.get("type") == "date": dp=v; break
+                                if dp and dp.get("type")=="date":
+                                    d = dp.get("date") or {}
+                                    s = _trim_to_minute(d.get("start"))
+                                    e = _trim_to_minute(d.get("end"))
+                                    d_str = s if not e else f"{s} ~ {e}"
+                                
+                                # 태그
+                                tags = []
+                                tp = props.get("태그")
+                                if not tp:
+                                    for v in props.values():
+                                        if isinstance(v, dict) and v.get("type") == "multi_select": tp=v; break
+                                if tp and tp.get("type")=="multi_select":
+                                    for o in tp.get("multi_select",[]):
+                                        if o.get("name"): tags.append(o.get("name"))
+                                
+                                t_str = ", ".join(tags) if tags else "(태그 없음)"
+                                lines.append(f"- {t_str} — {d_str}" if d_str else f"- {t_str}")
+
+                            ch = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) or await self.bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
+                            await ch.send("\n".join(lines))
+                            
+                        self.last_schedule_row_ids = ids
+                        self.save_state()
 
         except Exception as e:
             print(f"[NOTION] Error: {e}")
