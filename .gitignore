@@ -8,5 +8,4 @@ __pycache__/
 # secrets & runtime data
 .env
 *.env
-voice_time.json
 *.log
