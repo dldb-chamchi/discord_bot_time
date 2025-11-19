@@ -84,3 +84,4 @@ class MenuRecommender:
         for k in scope_keys:
             self._record(choice["name"], k)
         return choice
+    
