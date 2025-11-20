@@ -1,11 +1,12 @@
 # cogs/voice_time.py
 import datetime as dt
+import asyncio  # [추가] 딜레이 기능을 위해 필요
 from typing import List
 
 import discord
 from discord.ext import commands, tasks
 
-from config import VOICE_CHANNEL_ID, REPORT_CHANNEL_ID_ENTER, DATA_FILE
+from config import VOICE_CHANNEL_ID, REPORT_CHANNEL_ID_ENTER, DATA_FILE, REPORT_CHANNEL_ID_ALARM
 from time_utils import now_kst, iso
 from state_store import StateStore
 
@@ -20,13 +21,11 @@ class VoiceTimeCog(commands.Cog):
         self.channel_active = False
         self.last_alert_time: dt.datetime | None = None
 
-        # 태스크 시작
         self.daily_reporter.start()
 
     def cog_unload(self):
         self.daily_reporter.cancel()
 
-    # --------- 음성 상태 업데이트 ----------
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -40,7 +39,7 @@ class VoiceTimeCog(commands.Cog):
         before_id = before.channel.id if before.channel else None
         after_id = after.channel.id if after.channel else None
 
-        # 입장
+        # 1. 입장 (Enter)
         if before_id != target_id and after_id == target_id:
             self.store.state["sessions"][uid] = iso(now_kst())
             self.store.save()
@@ -79,14 +78,56 @@ class VoiceTimeCog(commands.Cog):
                     await report_ch.send(header)
             return
 
-        # 퇴장
+        # 2. 퇴장 (Leave)
         if before_id == target_id and after_id != target_id:
+            # 세션 기록 저장
             self.store.add_session_time(member.id)
             self.store.state["sessions"].pop(uid, None)
             self.store.save()
 
             if before.channel and len([m for m in before.channel.members if not m.bot]) == 0:
                 self.channel_active = False
+
+            # [핵심] 30초 딜레이 후 알림 발송 로직
+            if hasattr(self.bot, 'active_schedules') and member.id in self.bot.active_schedules:
+                # 30초 대기
+                await asyncio.sleep(30)
+
+                # 30초 후 현재 상태 다시 확인 (유저가 다시 들어왔는지 체크)
+                # member 객체는 옛날 정보일 수 있으므로, 길드에서 최신 멤버 정보를 다시 가져옴
+                current_member = member.guild.get_member(member.id)
+                
+                # 유저가 서버를 나갔거나(None), 
+                # 음성 채널에 없거나, 
+                # 음성 채널에 있어도 우리 타겟 채널이 아니라면 -> 알림 발송 대상
+                is_back_in_channel = False
+                if current_member and current_member.voice and current_member.voice.channel:
+                    if current_member.voice.channel.id == target_id:
+                        is_back_in_channel = True
+                
+                # 이미 돌아왔다면 알림 취소
+                if is_back_in_channel:
+                    return
+
+                # 여전히 나가 있다면 일정 체크 후 알림
+                scheduled_end = self.bot.active_schedules[member.id]
+                now = now_kst()
+                
+                if now < scheduled_end:
+                    time_diff = scheduled_end - now
+                    minutes_left = int(time_diff.total_seconds() / 60)
+                    
+                    if minutes_left > 1:
+                        alarm_ch = self.bot.get_channel(REPORT_CHANNEL_ID_ALARM) \
+                                   or await self.bot.fetch_channel(REPORT_CHANNEL_ID_ALARM)
+                        
+                        if alarm_ch:
+                            msg = (
+                                f"🚨 **{member.mention} 님, 어디 가시나요?**\n"
+                                f"아직 일정이 **{minutes_left}분** 남았습니다!\n"
+                                f"목표 시간: {scheduled_end.strftime('%H:%M')}"
+                            )
+                            await alarm_ch.send(msg)
             return
 
     async def _send_mentions_in_chunks(
@@ -102,19 +143,16 @@ class VoiceTimeCog(commands.Cog):
             text = f"{mention_list}\n{header_text}" if header_text else mention_list
             await report_ch.send(text)
 
-    # --------- 주간 리포트 (일요일 23:00 KST = 14:00 UTC) ----------
     @tasks.loop(time=dt.time(hour=14, minute=0, tzinfo=dt.timezone.utc))
     async def daily_reporter(self):
         now = now_kst()
         if now.weekday() != 6:
             return
 
-        # 진행 중 세션 반영
         for uid in list(self.store.state["sessions"].keys()):
             self.store.add_session_time(int(uid), until=now)
             self.store.state["sessions"][uid] = iso(now)
 
-        # 리포트 내용
         if not self.store.state["totals"]:
             content = "이번 주 대상 음성 채널 체류 기록이 없습니다."
         else:
@@ -133,7 +171,6 @@ class VoiceTimeCog(commands.Cog):
             self.store.state["totals"] = {}
             self.store.save()
 
-    # --------- 관리자용 voicetime 명령 ----------
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def voicetime(self, ctx: commands.Context):
@@ -150,3 +187,4 @@ class VoiceTimeCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(VoiceTimeCog(bot))
+    

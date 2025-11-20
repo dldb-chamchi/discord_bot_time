@@ -13,6 +13,9 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# [추가] 현재 진행 중인 스케줄을 저장할 공간 (Key: UserID, Value: 종료시간 datetime)
+bot.active_schedules = {}
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (id={bot.user.id})")
@@ -23,3 +26,4 @@ async def on_ready():
         print(f"[DEBUG] slash commands synced: {len(synced)}")
     except Exception as e:
         print(f"[DEBUG] slash sync error: {e}")
+        
