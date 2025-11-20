@@ -28,7 +28,7 @@ jobs:
             cd discord-bot-time/
 
             # 3. 혹시 실행 권한이 풀렸을 수 있으니 다시 부여
-            chmod +x redeploy.sh
+            # chmod +x redeploy.sh
 
             # 4. 배포 스크립트 실행
             ./redeploy.sh
