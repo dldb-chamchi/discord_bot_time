@@ -15,20 +15,22 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          # 포트 번호가 기본(22)이 아니라면 아래 주석 풀고 설정하세요
-          # port: ${{ secrets.DEPLOY_PORT }}
           script: |
             # 1. 에러 발생 시 즉시 중단
             set -e
 
-            cd
-
-            # 2. 프로젝트 폴더로 이동 (★ 여기가 제일 중요함!)
-            # (아까 git clone으로 만든 폴더 이름과 똑같아야 합니다)
             cd discord-bot-time/
 
-            # 3. 혹시 실행 권한이 풀렸을 수 있으니 다시 부여
-            # chmod +x redeploy.sh
+            # [안전한 해결책] 
+            # 문제가 된 'redeploy.sh' 파일만 콕 집어서 깃허브 상태로 되돌립니다.
+            # 다른 데이터 파일(json 등)은 건드리지 않으므로 안전합니다!
+            git checkout redeploy.sh
+
+            # 2. 최신 코드 받기
+            git pull origin main
+
+            # 3. 실행 권한 다시 부여
+            chmod +x redeploy.sh
 
             # 4. 배포 스크립트 실행
             ./redeploy.sh
