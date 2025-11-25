@@ -9,3 +9,24 @@ services:
       - .env # 같은 폴더에 있는 .env 파일을 자동으로 읽음
     volumes:
       - ./data:/app/data # [중요] 컨테이너가 삭제돼도 로컬의 data 폴더는 지키기
+    # [중요] 봇 로그 수집 활성화
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "python", "service": "discord-bot"}]'
+
+  datadog:
+    image: gcr.io/datadoghq-agent:7
+    container_name: datadog-agent
+    pid: host
+    env_file:
+      - .env
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_SITE=us5.datadoghq.com
+      - DD_LOGS_ENABLED=true
+      - DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true
+      - DD_PROCESS_AGENT_ENABLED=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
