@@ -14,7 +14,7 @@ services:
       com.datadoghq.ad.logs: '[{"source": "python", "service": "discord-bot"}]'
 
   datadog:
-    image: gcr.io/datadoghq-agent:7
+    image: gcr.io/datadoghq/agent:7
     container_name: datadog-agent
     pid: host
     env_file:
